@@ -5,7 +5,75 @@ import pandas as pd
 from osgeo import gdal
 import rasterio
 import rioxarray
-import leafmap
+# import leafmap
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Run disaster analysis workflow.")
+
+    valid_short_names = [
+        "OPERA_L3_DSWX-HLS_V1",
+        "OPERA_L3_DSWX-S1_V1",
+        "OPERA_L3_DIST-ALERT-HLS_V1",
+        "OPERA_L3_DIST-ANN-HLS_V1",
+        "OPERA_L2_RTC-S1_V1",
+        "OPERA_L2_CSLC-S1_V1",
+        "OPERA_L3_DISP-S1_V1",
+    ]
+
+    valid_layer_names = [
+        "WTR",
+        "BWTR",
+        "VEG-ANOM-MAX",
+        "VEG-DIST-STATUS"
+    ]
+
+    valid_modes = [
+        "flood",
+        "fire",
+        "earthquake"
+    ]
+
+    parser.add_argument(
+        "-b", "--bbox", nargs=4, type=float, metavar=("S", "N", "W", "E"),
+        required=True, help="Bounding box in the form: South North West East"
+    )
+
+    parser.add_argument(
+        "-s", "--satellite", type=str, required = False, default="all",
+        help="Which satellites to include. Use 'all' for all satellites."
+    )
+
+    parser.add_argument(
+        "-o", "--output_dir", type=Path, required=True,
+        help="Path to the directory where results and metadata will be saved."
+    )
+
+    parser.add_argument(
+        "-sn", "--short_name", type=str, required=False, choices=valid_short_names,
+        help="Short name to filter the DataFrame (must be one of the known OPERA products)"
+    )
+
+    parser.add_argument(
+        "-l", "--layer_name", type=str, required=False, choices=valid_layer_names,
+        help="Layer name to extract from metadata (e.g., 'WTR', 'BWTR', 'VEG-ANOM-MAX')"
+    )
+
+    parser.add_argument(
+        "-d", "--date", type=str, required=False,
+        help="Date string (YYYY-MM-DD) to filter rows by Start Date"
+    )
+
+    parser.add_argument(
+        "-n", "--number_of_dates", required=False, type=int, default=5,
+        help="Number of most recent dates to consider for OPERA products"
+    )
+
+    parser.add_argument(
+        "-m", "--mode", type=str, required=False, default="flood", choices=valid_modes,
+        help="Mode of operation: flood, fire, earthquake. Default is 'flood'."
+    )
+
+    return parser.parse_args()
 
 def authenticate():
     import earthaccess
@@ -56,7 +124,7 @@ def read_opera_metadata_csv(output_dir):
     return df
 
 def compile_and_load_data(layer_links):
-    from opera_utils import open_file
+    from opera_utils.disp._remote import open_file
     from collections import Counter
 
     username, password = authenticate()
@@ -81,56 +149,78 @@ def compile_and_load_data(layer_links):
 
     return DS
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Run disaster analysis workflow.")
+def generate_products(df_opera, mode, mode_dir):
+    import sys
+    sys.path.insert(0, "/u/trappist-r0/colespeed/work/opera_mosaic/")  # adjust this path
+    import opera_mosaic
+    from rasterio.shutil import copy
 
-    valid_short_names = [
-        "OPERA_L3_DSWX-HLS_V1",
-        "OPERA_L3_DSWX-S1_V1",
-        "OPERA_L3_DIST-ALERT-HLS_V1",
-        "OPERA_L3_DIST-ANN-HLS_V1",
-        "OPERA_L2_RTC-S1_V1",
-        "OPERA_L2_CSLC-S1_V1",
-        "OPERA_L3_DISP-S1_V1",
-    ]
+    if mode == "flood":
+        short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+        layer_names = ["WTR", "BWTR"]
+    elif mode == "fire":
+        short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
+        layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
+    elif mode == "earthquake":
+        short_names = ["OPERA_L2_RTC-S1_V1", "OPERA_L2_CSLC-S1_V1", "OPERA_L3_DISP-S1_V1"]
+        layer_names = ["DISP", "CSLC", "WTR"]  # Placeholder — update with actual layers
 
-    valid_layer_names = [
-        "WTR",
-        "BWTR",
-        "VEG-ANOM-MAX",
-    ]
+    df_opera['Start Time'] = pd.to_datetime(df_opera['Start Time'], errors='coerce')
+    df_opera['Start Date'] = df_opera['Start Time'].dt.date.astype(str)
+    unique_dates = df_opera['Start Date'].dropna().unique()
 
-    parser.add_argument(
-        "-b", "--bbox", nargs=4, type=float, metavar=("S", "N", "W", "E"),
-        required=True, help="Bounding box in the form: South North West East"
-    )
+    for date in unique_dates:
+        df_on_date = df_opera[df_opera['Start Date'] == date]
 
-    parser.add_argument(
-        "-s", "--satellite", type=str, default="all",
-        help="Which satellites to include. Use 'all' for all satellites."
-    )
+        for short_name in short_names:
+            df_sn = df_on_date[df_on_date['Dataset'] == short_name]
 
-    parser.add_argument(
-        "-o", "--output_dir", type=Path, required=True,
-        help="Path to the directory where results and metadata will be saved."
-    )
+            if df_sn.empty:
+                continue  # No matching products for this short_name on this date
 
-    parser.add_argument(
-        "--short_name", type=str, required=True, choices=valid_short_names,
-        help="Short name to filter the DataFrame (must be one of the known OPERA products)"
-    )
+            for layer in layer_names:
+                url_column = f"Download URL {layer}"
+                if url_column not in df_sn.columns:
+                    continue  # Skip if this layer column is not present
 
-    parser.add_argument(
-        "--layer_name", type=str, required=True, choices=valid_layer_names,
-        help="Layer name to extract from metadata (e.g., 'WTR', 'BWTR', 'VEG-ANOM-MAX')"
-    )
+                urls = df_sn[url_column].dropna().tolist()
+                if not urls:
+                    continue  # Skip if no valid URLs for this layer on this date
 
-    parser.add_argument(
-        "--date", type=str, required=True,
-        help="Date string (YYYY-MM-DD) to filter rows by Start Date"
-    )
+                # Do your processing here:
+                print(f"[INFO] Processing {short_name} - {layer} on {date}")
+                print(f"Found {len(urls)} URLs")
 
-    return parser.parse_args()
+                # Compile and load data
+                DS = compile_and_load_data(urls)
+
+                # Mosaic the datasets using the appropriate method/rule
+                mosaic, colormap, nodata = opera_mosaic.mosaic_opera(DS, product=short_name, merge_args={})
+                image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata)
+
+                # Create filename and full paths
+                mosaic_name = f"{short_name}_{layer}_{date}_mosaic.tif"
+                mosaic_path = mode_dir / mosaic_name
+                tmp_path = mode_dir / f"tmp_{mosaic_name}"
+
+                # Save the mosaic to the mode directory
+                copy(image, mosaic_path, driver='GTiff')
+
+                # Reproject/compress using GDAL
+                gdal.Warp(
+                    tmp_path,
+                    mosaic_path,
+                    xRes=30,
+                    yRes=30,
+                    creationOptions=["COMPRESS=DEFLATE"]
+                )
+
+                # Overwrite original with compressed version
+                os.replace(tmp_path, mosaic_path)
+
+                print(f"[INFO] Mosaic written to: {mosaic_path}")
+
+    return
 
 def main():
     import next_pass
@@ -141,66 +231,26 @@ def main():
 
     bbox = args.bbox
     satellite = args.satellite
-    disaster_name = args.output_dir
+    number_of_dates = args.number_of_dates
 
-    # Now call next_pass as a library
-    output_dir = next_pass.run_next_pass(bbox, satellite)
+    # Call next_pass to generate csv of relevant opera products
+    output_dir = next_pass.run_next_pass(bbox, satellite, number_of_dates)
     dest = args.output_dir / output_dir.name
 
-    # Move or copy whole directory
     output_dir.rename(dest)
     print(f"[INFO] Moved next_pass output directory to {dest}")
 
     # Read the metadata CSV file
     df_opera = read_opera_metadata_csv(dest)
+    mode = args.mode
 
-    short_name = args.short_name
-    layer_name = args.layer_name
-    date = args.date 
+    # Make a new directory with the mode name
+    mode_dir = args.output_dir / mode
+    make_output_dir(mode_dir)
+    print(f"[INFO] Created mode directory: {mode_dir}")
 
-    df_opera['Start Time'] = pd.to_datetime(df_opera['Start Time'], format='mixed')
-    df_opera['Start Date'] = df_opera['Start Time'].dt.date.astype(str)
-
-    layers = f"Download URL {layer_name}"
-
-    matching = df_opera[df_opera['Start Date'] == date]
-
-    layer_links = matching[layers].dropna().tolist()
-
-    if not layer_links:
-        print(f"[WARNING] No matching links found for date {date} and layer {layer_name}.")
-        return
+    # Generate products based on the mode
+    generate_products(df_opera, mode, mode_dir)
     
-    else:
-        DS = compile_and_load_data(layer_links)
-        print(f"[INFO] Loaded {len(DS)} datasets from matching links.")
-        # Perform merge using OPERA product pixel priority rules
-        mosaic, colormap, nodata = leafmap.common.mosaic_opera(DS, product=short_name, merge_args={})
-        image = leafmap.common.array_to_image(mosaic, colormap=colormap, nodata=nodata)
-        print("Pre-event granule mosaic generated successfully...")
-
-        # Create filename and full paths
-        mosaic_name = f"{short_name}_{layer_name}_{date}_mosaic.tif"
-        mosaic_path = args.output_dir / mosaic_name
-        tmp_path = args.output_dir / f"tmp_{mosaic_name}"
-
-        # Save the mosaic
-        rasterio.shutil.copy(image, mosaic_path, driver='GTiff')
-
-        # Reproject/compress using GDAL
-        gdal.Warp(
-            tmp_path,
-            mosaic_path,
-            xRes=30,
-            yRes=30,
-            creationOptions=["COMPRESS=DEFLATE"]
-        )
-
-        # Overwrite original with compressed version
-        os.replace(tmp_path, mosaic_path)
-
-        print(f"[INFO] Mosaic written to: {mosaic_path}")
-
-
 if __name__ == "__main__":
     main()
