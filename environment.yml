@@ -1,0 +1,21 @@
+name: disasters
+channels:
+  - conda-forge
+dependencies:
+  - asf_search
+  - beautifulsoup4
+  - boto3
+  - earthaccess
+  - gdal
+  - geopandas
+  - jupyterlab
+  - leafmap
+  - lxml
+  - matplotlib
+  - numpy
+  - opera-utils
+  - pygmt
+  - rasterio
+  - rioxarray
+  - tabulate
+  - xarray
