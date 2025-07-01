@@ -1,0 +1,6 @@
+0 255 255 255 1 255 255 255 ;Not water
+1 0 0 255 2 0 0 255 ;Water
+2 180 213 244 3 180 213 244 ;Partial Surface Water
+3 0 255 255 253 0 255 255 ;Snow/Ice
+253 128 128 128 254 128 128 128 ;Cloud/Shadow
+254 0 0 127 255 0 0 127 ;Ocean Mask
