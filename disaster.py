@@ -3,10 +3,16 @@ import argparse
 from pathlib import Path
 import pandas as pd
 from osgeo import gdal
+import next_pass
 import rasterio
 import rioxarray
 
 def parse_arguments():
+    """
+    Parse command line arguments for the disaster analysis workflow.
+    Returns:
+        argparse.Namespace: Parsed command line arguments.
+    """
     parser = argparse.ArgumentParser(description="Run disaster analysis workflow.")
 
     valid_short_names = [
@@ -75,6 +81,11 @@ def parse_arguments():
     return parser.parse_args()
 
 def authenticate():
+    """
+    Authenticate with Earthdata and ASF for data access.
+    Returns:
+        tuple: (username, password) for Earthdata and ASF access.
+    """
     import earthaccess
     import boto3
     import rasterio
@@ -106,14 +117,31 @@ def authenticate():
     return username, password
 
 def make_output_dir(output_dir: Path):
+    """
+    Create the output directory if it does not exist.
+    Args:
+        output_dir (Path): Path to the output directory.
+    Raises:
+        Exception: If the directory cannot be created.
+    """
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         print(f"[INFO] Created or reused output directory: {output_dir}")
     except Exception as e:
         print(f"[ERROR] Could not create output directory: {e}")
         raise
+    return
 
 def read_opera_metadata_csv(output_dir):
+    """
+    Read the OPERA products metadata CSV file.
+    Args:
+        output_dir (Path): Path to the directory containing the CSV file.
+    Returns:
+        pd.DataFrame: DataFrame containing the metadata from the CSV file.
+    Raises:
+        FileNotFoundError: If the CSV file does not exist in the specified directory.
+    """
     csv_path = output_dir / "opera_products_metadata.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found at {csv_path}")
@@ -123,6 +151,15 @@ def read_opera_metadata_csv(output_dir):
     return df
 
 def compile_and_load_data(layer_links):
+    """
+    Compile and load data from the provided layer links.
+    Args:
+        layer_links (list): List of URLs corresponding to the OPERA data layers.
+    Returns:
+        list: List of rioxarray datasets loaded from the provided links.
+    Raises:
+        Exception: If there is an error loading any of the datasets.
+    """
     from opera_utils.disp._remote import open_file
     from collections import Counter
 
@@ -149,6 +186,15 @@ def compile_and_load_data(layer_links):
     return DS
 
 def generate_products(df_opera, mode, mode_dir):
+    """
+    Generate products based on the provided DataFrame and mode.
+    Args:
+        df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
+        mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
+        mode_dir (Path): Path to the directory where products will be saved.
+    Raises:
+        Exception: If the mode is not recognized or if there are issues with data processing.
+    """
     import opera_mosaic
     from rasterio.shutil import copy
 
@@ -242,6 +288,14 @@ def expand_region(region, width_deg=15, height_deg=10):
     Return a new region [xmin, xmax, ymin, ymax] of fixed size,
     centered on the centroid of the input region, with coordinates rounded
     to 0 decimal places.
+    Args:
+        region (list): Input region in the form [xmin, xmax, ymin, ymax].
+        width_deg (float): Desired width in degrees.
+        height_deg (float): Desired height in degrees.
+    Returns:
+        list: New region with fixed size, centered on the input region.
+    Raises:
+        ValueError: If the input region is not in the correct format.
     """
     xmin, xmax, ymin, ymax = region
     center_lon = (xmin + xmax) / 2
@@ -259,6 +313,16 @@ def expand_region(region, width_deg=15, height_deg=10):
     return expanded_region
 
 def expand_region_to_aspect(region, target_aspect):
+    """
+    Expand the input region to match a target aspect ratio.
+    Args:
+        region (list): Input region in the form [xmin, xmax, ymin, ymax].
+        target_aspect (float): Desired aspect ratio (width / height).
+    Returns:
+        list: New region with adjusted aspect ratio.
+    Raises:
+        ValueError: If the input region is not in the correct format.
+    """
     xmin, xmax, ymin, ymax = map(float, region)
     width = xmax - xmin
     height = ymax - ymin
@@ -280,6 +344,19 @@ def expand_region_to_aspect(region, target_aspect):
     return [xmin, xmax, ymin, ymax]
 
 def make_map(maps_dir, mosaic_path, short_name, layer, date):
+    """
+    Create a map using PyGMT from the provided mosaic path.
+    Args:
+        maps_dir (Path): Directory where the map will be saved.
+        mosaic_path (Path): Path to the mosaic file.
+        short_name (str): Short name of the product.
+        layer (str): Layer name to be used in the map.
+        date (str): Date string in the format YYYY-MM-DD.
+    Returns:
+        map_name (Path): Path to the saved map image.
+    Raises:
+        ImportError: If required libraries are not installed.
+    """
     import pygmt
     import rioxarray
     from pyproj import Geod
@@ -451,6 +528,15 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date):
     return map_name
 
 def make_layout(layout_dir, map_name, short_name, layer, date):
+    """
+    Create a layout using matplotlib for the provided map.
+    Args:
+        layout_dir (Path): Directory where the layout will be saved.
+        map_name (Path): Path to the map image.
+        short_name (str): Short name of the product.
+        layer (str): Layer name to be used in the layout.
+        date (str): Date string in the format YYYY-MM-DD.
+    """
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
     import matplotlib.image as mpimg
@@ -621,8 +707,14 @@ def make_layout(layout_dir, map_name, short_name, layer, date):
     return 
 
 def main():
-    import next_pass
-
+    """
+    Main entry point for the disaster analysis workflow.
+    This function parses command line arguments, sets up the output directory,
+    authenticates with Earthdata and ASF, and runs the next_pass module to generate
+    disaster products based on the specified mode (flood, fire, earthquake).
+    Raises:
+        Exception: If there are issues with directory creation, CSV reading, or product generation.
+    """
     args = parse_arguments()
     
     make_output_dir(args.output_dir)
