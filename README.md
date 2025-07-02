@@ -2,7 +2,7 @@
 
 # disasters
 
-An automated workflow for generating disaster response maps and layouts using NASA-JPL OPERA products.
+An automated workflow for generating disaster response maps and layouts using NASA-JPL OPERA products over a user-defined AOI.
 
 ## Overview
 
@@ -12,7 +12,7 @@ This tool streamlines the generation of data to support disaster response effort
 - Wildfires (e.g., DIST-ALERT-HLS)
 - Earthquakes (e.g., CSLC, DISP) *(coming soon)*
 
-The output includes ready-to-share maps and analysis-ready GeoTIFFs for any user-defined region and event type. Currently flood and wildfires (*earthquakes coming soon*) are supported.
+The output includes ready-to-share maps and analysis-ready GeoTIFFs for any user-defined region and event type. Currently flood and wildfires are supported (*earthquakes coming soon*).
 
 ## Development setup
 
