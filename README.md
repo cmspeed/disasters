@@ -45,7 +45,7 @@ The provided `environment.yml` file sets up a fully functional environment with 
 ```bash
 python disaster.py -b 35 37 -115 -113 -o LakeMead -m flood -n 2
 ```
-#### Example: Generate fire impact maps over New Mexico using the fire most recent dates of available OPERA data (default)
+#### Example: Generate fire impact maps over New Mexico using the five most recent dates (default) of available OPERA data
 ```bash
 python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire
 ```
