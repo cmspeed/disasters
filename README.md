@@ -2,7 +2,7 @@
 
 # disasters
 
-An automated workflow for generating disaster response maps and layouts using NASA-JPL OPERA products over a user-defined AOI.
+An automated workflow for generating disaster response maps and layouts over a user-defined AOI using NASA-JPL OPERA products.
 
 ## Overview
 
