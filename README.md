@@ -41,11 +41,11 @@ The provided `environment.yml` file sets up a fully functional environment with 
 
 ### Usage
 
-#### Example: Generate flood maps over Lake Mead, Nevada using the two most recent dates of available OPERA data
+#### Example: Generate flood maps over Lake Mead, Nevada using the two most recent OPERA products
 ```bash
 python disaster.py -b 35 37 -115 -113 -o LakeMead -m flood -n 2
 ```
-#### Example: Generate fire impact maps over New Mexico using the five most recent dates (default) of available OPERA data
+#### Example: Generate fire impact maps over New Mexico using the five (default) most recent OPERA products
 ```bash
 python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire
 ```
