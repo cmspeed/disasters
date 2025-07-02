@@ -171,8 +171,8 @@ def generate_products(df_opera, mode, mode_dir):
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
         layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
     elif mode == "earthquake":
-        short_names = ["OPERA_L2_RTC-S1_V1", "OPERA_L2_CSLC-S1_V1", "OPERA_L3_DISP-S1_V1"]
-        layer_names = ["DISP", "CSLC"]  # Placeholder — update with actual layers
+        print("Earthquake mode coming soon. Exiting...")
+        return
 
     df_opera['Start Time'] = pd.to_datetime(df_opera['Start Time'], errors='coerce')
     df_opera['Start Date'] = df_opera['Start Time'].dt.date.astype(str)
@@ -630,6 +630,11 @@ def main():
     bbox = args.bbox
     satellite = args.satellite
     number_of_dates = args.number_of_dates
+
+    # Terminate if user selects 'earthquake' mode, for now
+    if args.mode == "earthquake":
+        print("Earthquake mode coming soon. Exiting...")
+        return
 
     # Call next_pass to generate csv of relevant opera products
     output_dir = next_pass.run_next_pass(bbox, satellite, number_of_dates)
