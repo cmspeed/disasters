@@ -14,8 +14,11 @@ dependencies:
   - matplotlib
   - numpy
   - opera-utils
+  - pip
   - pygmt
   - rasterio
   - rioxarray
   - tabulate
   - xarray
+  - pip:
+      - git+https://github.com/cmspeed/next_pass.git@add-setup
