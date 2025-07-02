@@ -28,7 +28,7 @@ python disaster.py -b 35 37 -115 -113 -o LakeMead -m flood -n 2
 `-b / --bbox` Required. The bounding box for the area of interest, specified as four space-separated float values: South North West East
 Example:
 `-b 35 37 -115 -113`
-This selects a region from 35°N to 37°N latitude and -115°E to -113°E longitude.
+This selects a region from 35°N to 37°N latitude and 115°W to 113°W longitude.
 
 `-o / --output_dir` Required. Name or path of the directory where output data and maps will be saved.
 Example:
