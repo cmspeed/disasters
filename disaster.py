@@ -26,26 +26,16 @@ def parse_arguments():
     ]
 
     valid_layer_names = [
-        "WTR",
-        "BWTR",
-        "VEG-ANOM-MAX",
-        "VEG-DIST-STATUS"
+        "WTR", "BWTR", "VEG-ANOM-MAX", "VEG-DIST-STATUS"
     ]
 
-    valid_modes = [
-        "flood",
-        "fire",
-        "earthquake"
-    ]
+    valid_modes = ["flood","fire","earthquake"]
+
+    valid_functions = ["opera_search", "both"]
 
     parser.add_argument(
         "-b", "--bbox", nargs=4, type=float, metavar=("S", "N", "W", "E"),
         required=True, help="Bounding box in the form: South North West East"
-    )
-
-    parser.add_argument(
-        "-s", "--satellite", type=str, required = False, default="all",
-        help="Which satellites to include. Use 'all' for all satellites."
     )
 
     parser.add_argument(
@@ -54,28 +44,33 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "-sn", "--short_name", type=str, required=False, choices=valid_short_names,
+        "-sn", "--short_name", type=str, choices=valid_short_names,
         help="Short name to filter the DataFrame (must be one of the known OPERA products)"
     )
 
     parser.add_argument(
-        "-l", "--layer_name", type=str, required=False, choices=valid_layer_names,
+        "-l", "--layer_name", type=str, choices=valid_layer_names,
         help="Layer name to extract from metadata (e.g., 'WTR', 'BWTR', 'VEG-ANOM-MAX')"
     )
 
     parser.add_argument(
-        "-d", "--date", type=str, required=False,
+        "-d", "--date", type=str,
         help="Date string (YYYY-MM-DD) to filter rows by Start Date"
     )
 
     parser.add_argument(
-        "-n", "--number_of_dates", required=False, type=int, default=5,
+        "-n", "--number_of_dates", type=int, default=5,
         help="Number of most recent dates to consider for OPERA products"
     )
 
     parser.add_argument(
-        "-m", "--mode", type=str, required=False, default="flood", choices=valid_modes,
+        "-m", "--mode", type=str, default="flood", choices=valid_modes,
         help="Mode of operation: flood, fire, earthquake. Default is 'flood'."
+    )
+
+    parser.add_argument(
+        "-f", "--functionality", type=str, default="opera_search", choices=valid_functions,
+        help="Functionality to run: 'opera_search' or 'both'. Default is 'opera_search'."
     )
 
     return parser.parse_args()
@@ -716,22 +711,23 @@ def main():
         Exception: If there are issues with directory creation, CSV reading, or product generation.
     """
     args = parse_arguments()
-    
-    make_output_dir(args.output_dir)
 
-    bbox = args.bbox
-    satellite = args.satellite
-    number_of_dates = args.number_of_dates
+    print(args)
 
     # Terminate if user selects 'earthquake' mode, for now
     if args.mode == "earthquake":
         print("Earthquake mode coming soon. Exiting...")
         return
 
-    # Call next_pass to generate csv of relevant opera products
-    output_dir = next_pass.run_next_pass(bbox, satellite, number_of_dates)
-    dest = args.output_dir / output_dir.name
+    output_dir = next_pass.run_next_pass(
+        bbox=args.bbox,
+        number_of_dates=args.number_of_dates,
+        date=args.date,
+        functionality=args.functionality
+    )
 
+    make_output_dir(args.output_dir)
+    dest = args.output_dir / output_dir.name
     output_dir.rename(dest)
     print(f"[INFO] Moved next_pass output directory to {dest}")
 
