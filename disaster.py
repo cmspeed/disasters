@@ -258,6 +258,57 @@ def reclassify_snow_ice_as_water(DS, conf_DS):
 
     return updated_list
 
+def filter_snow_ice_false_positives(DS, conf_DS):
+    """
+    Filter out false snow/ice positives from the datasets using the provided confidence datasets.
+    Args:
+        DS (list): List of rioxarray datasets to filter.
+        conf_DS (list): List of rioxarray datasets used for filtering.
+    Returns:
+        list: List of filtered rioxarray datasets.
+    Raises:
+        Exception: If there is an error during filtering.
+    """
+    if conf_DS is None:
+        raise ValueError("conf_DS must not be None when filtering flood products.")
+
+    if len(DS) != len(conf_DS):
+        raise ValueError("DS and conf_DS must be the same length.")
+    
+    # Keep pixels with these confidence values
+    values_to_keep = [1, 3, 4, 21, 23, 24]
+
+    filtered_list = []
+    for da_data, da_conf in zip(DS, conf_DS):
+
+        # Build confidence mask
+        conf_mask = da_conf.isin(values_to_keep)
+
+        # Handle nodata
+        nodata = (
+            da_data.rio.nodata
+            if hasattr(da_data, "rio") and da_data.rio.nodata is not None
+            else da_data.attrs.get("_FillValue", np.nan)
+        )
+
+        # Apply mask: retain valid pixels, set others to nodata
+        filtered = xr.where(conf_mask, da_data, nodata)
+
+        # Preserve metadata
+        filtered.attrs.update(da_data.attrs)
+
+        if hasattr(da_data, "rio"):
+            filtered = (
+                filtered.rio.write_nodata(nodata)
+                        .rio.write_crs(da_data.rio.crs)
+                        .rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
+                        .rio.write_transform(da_data.rio.transform())
+            )
+
+        filtered_list.append(filtered)
+
+    return filtered_list
+
 def generate_products(df_opera, mode, mode_dir, layout_title):
     """
     Generate products based on the provided DataFrame and mode.
@@ -316,12 +367,11 @@ def generate_products(df_opera, mode, mode_dir, layout_title):
                 if not urls:
                     continue  # Skip if no valid URLs for this layer on this date
 
-                # Do your processing here:
                 print(f"[INFO] Processing {short_name} - {layer} on {date}")
                 print(f"Found {len(urls)} URLs")
 
                 # Compile and load data
-                if mode == "fire" or mode == "flood":
+                if mode == "fire":
                     DS = compile_and_load_data(urls, mode)
                 
                 if mode == "flood":
