@@ -4,8 +4,10 @@ from pathlib import Path
 import pandas as pd
 from osgeo import gdal
 import next_pass
+import numpy as np
 import rasterio
 import rioxarray
+import xarray as xr
 
 def parse_arguments():
     """
@@ -150,11 +152,14 @@ def read_opera_metadata_csv(output_dir):
     print(f"[INFO] Loaded {len(df)} rows from {csv_path}")
     return df
 
-def compile_and_load_data(layer_links):
+def compile_and_load_data(data_layer_links, mode, conf_layer_links=None):
     """
-    Compile and load data from the provided layer links.
+    Compile and load data from the provided layer links for mosaicking. Also compile and load
+    data for filtering (depending on whether it is provided).
     Args:
-        layer_links (list): List of URLs corresponding to the OPERA data layers.
+        data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
+        mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
+        conf_layer_links (list, optional): List of URLs for additional layers to filter false positives.
     Returns:
         list: List of rioxarray datasets loaded from the provided links.
     Raises:
@@ -166,7 +171,7 @@ def compile_and_load_data(layer_links):
     username, password = authenticate()
 
     DS = []
-    for link in layer_links:
+    for link in data_layer_links:
         try:
             DS.append(rioxarray.open_rasterio(link, masked=False))
         except Exception as e:
@@ -183,7 +188,75 @@ def compile_and_load_data(layer_links):
     most_common_crs_str, _ = crs_counter.most_common(1)[0]
     DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
 
-    return DS
+    # If conf_layer_links AND mode == 'flood' compile and load layers to use in filtering
+    if conf_layer_links and mode == "flood":
+        conf_DS = []
+        for link in conf_layer_links:
+            try:
+                conf_DS.append(rioxarray.open_rasterio(link, masked=False))
+            except Exception as e:
+                f = open_file(
+                    link,
+                    earthdata_username=username,
+                    earthdata_password=password,
+                )
+                conf_DS.append(rioxarray.open_rasterio(f, masked=False))
+        return DS, conf_DS
+    else:
+        return DS
+
+def reclassify_snow_ice_as_water(DS, conf_DS):
+    """
+    Reclassify false snow/ice positives (value 252) as water (value 1) based on the confidence layers.
+    
+    Args:
+        DS (list): List of rioxarray datasets (BWTR layers).
+        conf_DS (list): List of rioxarray datasets (CONF layers).
+    
+    Returns:
+        list: List of updated rioxarray datasets with 252 reclassified as 1.
+    """
+    if conf_DS is None:
+        raise ValueError("conf_DS must not be None when reclassifying snow/ice.")
+
+    if len(DS) != len(conf_DS):
+        raise ValueError("DS and conf_DS must be the same length.")
+    
+    values_to_reclassify = [1, 3, 4, 21, 23, 24]
+
+    updated_list = []
+
+    for da_data, da_conf in zip(DS, conf_DS):
+        # Get the original data values
+        data_values = da_data.values.copy()
+        conf_values = da_conf.values
+
+        # Identify locations where DS == 252 and conf layer indicates water
+        condition = (data_values == 252) & np.isin(conf_values, values_to_reclassify)
+
+        # Reclassify those pixels to 1 (Water)
+        data_values[condition] = 1
+
+        # Create updated DataArray
+        updated = xr.DataArray(
+            data_values,
+            coords=da_data.coords,
+            dims=da_data.dims,
+            attrs=da_data.attrs
+        )
+
+        # Preserve spatial metadata
+        if hasattr(da_data, "rio"):
+            updated = (
+                updated.rio.write_nodata(da_data.rio.nodata)
+                       .rio.write_crs(da_data.rio.crs)
+                       .rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
+                       .rio.write_transform(da_data.rio.transform())
+            )
+
+        updated_list.append(updated)
+
+    return updated_list
 
 def generate_products(df_opera, mode, mode_dir, layout_title):
     """
@@ -248,7 +321,22 @@ def generate_products(df_opera, mode, mode_dir, layout_title):
                 print(f"Found {len(urls)} URLs")
 
                 # Compile and load data
-                DS = compile_and_load_data(urls)
+                if mode == "fire" or mode == "flood":
+                    DS = compile_and_load_data(urls, mode)
+                
+                if mode == "flood":
+                    conf_column = "Download URL CONF"
+                    conf_layer_links = df_sn[conf_column].dropna().tolist() if conf_column in df_sn.columns else []
+                    if not conf_layer_links:
+                        print(f"[WARN] No CONF URLs found for {short_name} on {date}")
+                        conf_DS = None
+                    else:
+                        print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
+
+                    DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
+                
+                    # Filter out false snow/ice positives
+                    DS = reclassify_snow_ice_as_water(DS, conf_DS)
 
                 # Mosaic the datasets using the appropriate method/rule
                 mosaic, colormap, nodata = opera_mosaic.mosaic_opera(DS, product=short_name, merge_args={})
