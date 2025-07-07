@@ -717,21 +717,19 @@ def main():
     """
     args = parse_arguments()
     
-    make_output_dir(args.output_dir)
-
-    bbox = args.bbox
-    satellite = args.satellite
-    number_of_dates = args.number_of_dates
-
     # Terminate if user selects 'earthquake' mode, for now
     if args.mode == "earthquake":
         print("Earthquake mode coming soon. Exiting...")
         return
 
-    # Call next_pass to generate csv of relevant opera products
-    output_dir = next_pass.run_next_pass(bbox, satellite, number_of_dates)
-    dest = args.output_dir / output_dir.name
+    output_dir = next_pass.run_next_pass(
+        bbox=args.bbox,
+        number_of_dates=args.number_of_dates,
+        date=args.date,
+    )
 
+    make_output_dir(args.output_dir)
+    dest = args.output_dir / output_dir.name
     output_dir.rename(dest)
     print(f"[INFO] Moved next_pass output directory to {dest}")
 
