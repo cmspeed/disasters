@@ -712,8 +712,6 @@ def main():
     """
     args = parse_arguments()
 
-    print(args)
-
     # Terminate if user selects 'earthquake' mode, for now
     if args.mode == "earthquake":
         print("Earthquake mode coming soon. Exiting...")
