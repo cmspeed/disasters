@@ -43,11 +43,11 @@ The provided `environment.yml` file sets up a fully functional environment with 
 
 #### Example: Generate flood maps over Lake Mead, Nevada using the two most recent OPERA products
 ```bash
-python disaster.py -b 35 37 -115 -113 -o LakeMead -m flood -n 2
+python disaster.py -b 35 37 -115 -113 -o LakeMead -m flood -n 2 -lt "Lake Mead Floods"
 ```
 #### Example: Generate fire impact maps over New Mexico using the five (default) most recent OPERA products
 ```bash
-python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire
+python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire -lt "New Mexico Fires, June 2025"
 ```
 ### Command-line Arguments
 
@@ -56,7 +56,8 @@ python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire
 | `-b`, `--bbox`        | Yes      | Bounding box: `South North West East` (space-separated floats)                              |
 | `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results                                               |
 | `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, or `earthquake`                                              |
-| `-n`, `--number_of_dates` | No  | Number of most recent dates to process (default: `5`)                                        |
+| `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`)                                        |
+| `-lt`, `--layout_title` | No     | Title of PDF layout generated for each product (default: `Layout Title`)                     |
 
 ### Disaster Modes
 
@@ -78,5 +79,4 @@ For each valid product and date:
 Products are organized in a timestamped subdirectory under your specified `--output_dir`.
 
 ## Contributing
-
 Contributions are welcome! Please open an issue or submit a pull request.
