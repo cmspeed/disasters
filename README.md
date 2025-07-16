@@ -53,11 +53,11 @@ python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire -lt "New Mexico Fire
 
 | Argument             | Required | Description                                                                                   |
 |----------------------|----------|-----------------------------------------------------------------------------------------------|
-| `-b`, `--bbox`        | Yes      | Bounding box: `South North West East` (space-separated floats)                              |
-| `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results                                               |
-| `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, or `earthquake`                                              |
-| `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`)                                        |
-| `-lt`, `--layout_title` | No     | Title of PDF layout generated for each product (default: `Layout Title`)                     |
+| `-b`, `--bbox`        | Yes      | Bounding box: `South North West East` (space-separated floats) |
+| `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results |
+| `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, or `earthquake`|
+| `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`) |
+| `-lt`, `--layout_title` | Yes     | Title of PDF layout generated for each product |
 
 ### Disaster Modes
 

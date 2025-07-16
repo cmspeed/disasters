@@ -74,8 +74,8 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "-lt", "--layout_title", type=str, default="Layout Title",
-        help="Title for the PDF layout(s). Must be enclosed in double quotes. Default is 'Layout Title'."
+        "-lt", "--layout_title", type=str, required=True, default="Layout Title",
+        help="Title for the PDF layout(s). Must be enclosed in double quotes and is required."
     )
 
     return parser.parse_args()
@@ -528,7 +528,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date):
 
     return map_name
 
-def make_layout(layout_dir, map_name, short_name, layer, date, layout_title="Layout Title"):
+def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
     """
     Create a layout using matplotlib for the provided map.
     Args:
@@ -537,7 +537,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title="Lay
         short_name (str): Short name of the product.
         layer (str): Layer name to be used in the layout.
         date (str): Date string in the format YYYY-MM-DD.
-        layout_title (str): Title for the layout. Default is "Layout Title".
+        layout_title (str): Title for the layout.
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
