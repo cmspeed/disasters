@@ -79,5 +79,4 @@ For each valid product and date:
 Products are organized in a timestamped subdirectory under your specified `--output_dir`.
 
 ## Contributing
-
 Contributions are welcome! Please open an issue or submit a pull request.
