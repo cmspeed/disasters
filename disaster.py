@@ -258,60 +258,11 @@ def reclassify_snow_ice_as_water(DS, conf_DS):
 
     return updated_list
 
-def filter_snow_ice_false_positives(DS, conf_DS):
-    """
-    Filter out false snow/ice positives from the datasets using the provided confidence datasets.
-    Args:
-        DS (list): List of rioxarray datasets to filter.
-        conf_DS (list): List of rioxarray datasets used for filtering.
-    Returns:
-        list: List of filtered rioxarray datasets.
-    Raises:
-        Exception: If there is an error during filtering.
-    """
-    if conf_DS is None:
-        raise ValueError("conf_DS must not be None when filtering flood products.")
-
-    if len(DS) != len(conf_DS):
-        raise ValueError("DS and conf_DS must be the same length.")
-    
-    # Keep pixels with these confidence values
-    values_to_keep = [1, 3, 4, 21, 23, 24]
-
-    filtered_list = []
-    for da_data, da_conf in zip(DS, conf_DS):
-
-        # Build confidence mask
-        conf_mask = da_conf.isin(values_to_keep)
-
-        # Handle nodata
-        nodata = (
-            da_data.rio.nodata
-            if hasattr(da_data, "rio") and da_data.rio.nodata is not None
-            else da_data.attrs.get("_FillValue", np.nan)
-        )
-
-        # Apply mask: retain valid pixels, set others to nodata
-        filtered = xr.where(conf_mask, da_data, nodata)
-
-        # Preserve metadata
-        filtered.attrs.update(da_data.attrs)
-
-        if hasattr(da_data, "rio"):
-            filtered = (
-                filtered.rio.write_nodata(nodata)
-                        .rio.write_crs(da_data.rio.crs)
-                        .rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
-                        .rio.write_transform(da_data.rio.transform())
-            )
-
-        filtered_list.append(filtered)
-
-    return filtered_list
-
 def generate_products(df_opera, mode, mode_dir, layout_title):
     """
-    Generate products based on the provided DataFrame and mode.
+    Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
+    If the mode is "flood", the DSWx Confidence layer will be used to reclassify false snow/ice positives as water.
+    This approach is specific to flood mode and will not be applied for other modes (i.e, fire or earthquake). 
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
         mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
@@ -373,6 +324,10 @@ def generate_products(df_opera, mode, mode_dir, layout_title):
                 # Compile and load data
                 if mode == "fire":
                     DS = compile_and_load_data(urls, mode)
+                    try:
+                        colormap = opera_mosaic.get_image_colormap(DS[0])
+                    except Exception as e:
+                        colormap = None
                 
                 if mode == "flood":
                     conf_column = "Download URL CONF"
@@ -384,12 +339,16 @@ def generate_products(df_opera, mode, mode_dir, layout_title):
                         print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
 
                     DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
+                    try:
+                        colormap = opera_mosaic.get_image_colormap(DS[0])
+                    except Exception as e:
+                        colormap = None
                 
-                    # Filter out false snow/ice positives
+                    # Reclassify false snow/ice positives
                     DS = reclassify_snow_ice_as_water(DS, conf_DS)
 
                 # Mosaic the datasets using the appropriate method/rule
-                mosaic, colormap, nodata = opera_mosaic.mosaic_opera(DS, product=short_name, merge_args={})
+                mosaic, _, nodata = opera_mosaic.mosaic_opera(DS, product=short_name, merge_args={})
                 image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata)
 
                 # Create filename and full paths
@@ -855,7 +814,6 @@ def main():
     """
     args = parse_arguments()
 
-    
     # Terminate if user selects 'earthquake' mode, for now
     if args.mode == "earthquake":
         print("Earthquake mode coming soon. Exiting...")
