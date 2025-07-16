@@ -73,6 +73,11 @@ def parse_arguments():
         help="Functionality to run: 'opera_search' or 'both'. Default is 'opera_search'."
     )
 
+    parser.add_argument(
+        "-lt", "--layout_title", type=str, default="Layout Title",
+        help="Title for the PDF layout(s). Must be enclosed in double quotes. Default is 'Layout Title'."
+    )
+
     return parser.parse_args()
 
 def authenticate():
@@ -180,13 +185,14 @@ def compile_and_load_data(layer_links):
 
     return DS
 
-def generate_products(df_opera, mode, mode_dir):
+def generate_products(df_opera, mode, mode_dir, layout_title):
     """
     Generate products based on the provided DataFrame and mode.
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
         mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
         mode_dir (Path): Path to the directory where products will be saved.
+        layout_title (str): Title for the PDF layout(s).
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
@@ -274,7 +280,7 @@ def generate_products(df_opera, mode, mode_dir):
                 map_name = make_map(maps_dir, mosaic_path, short_name, layer, date)
 
                 # Make a layout with matplotlib
-                make_layout(layouts_dir, map_name, short_name, layer, date)
+                make_layout(layouts_dir, map_name, short_name, layer, date, layout_title)
 
     return
 
@@ -522,7 +528,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date):
 
     return map_name
 
-def make_layout(layout_dir, map_name, short_name, layer, date):
+def make_layout(layout_dir, map_name, short_name, layer, date, layout_title="Layout Title"):
     """
     Create a layout using matplotlib for the provided map.
     Args:
@@ -531,6 +537,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date):
         short_name (str): Short name of the product.
         layer (str): Layer name to be used in the layout.
         date (str): Date string in the format YYYY-MM-DD.
+        layout_title (str): Title for the layout. Default is "Layout Title".
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
@@ -573,8 +580,6 @@ def make_layout(layout_dir, map_name, short_name, layer, date):
     wrap_width = 50
 
     # Map text elements
-    title = "Placeholder Title"
-
     if short_name == "OPERA_L3_DSWX-S1_V1":
         subtitle = "OPERA Dynamic Surface Water eXtent from Sentinel-1 (DSWx-S1)"
         map_information = (
@@ -635,7 +640,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date):
 
 
     # Wrapping text
-    title_wrp = textwrap.fill(title, width=40)
+    title_wrp = textwrap.fill(layout_title, width=40)
     subtitle_wrp = textwrap.fill(subtitle, width=wrap_width)
     acquisitions_wrp = textwrap.fill(acquisitions, width=wrap_width)
     map_information_wrp = textwrap.fill(map_information, width=wrap_width)
@@ -731,16 +736,15 @@ def main():
 
     # Read the metadata CSV file
     df_opera = read_opera_metadata_csv(dest)
-    mode = args.mode
 
     # Make a new directory with the mode name
-    mode_dir = args.output_dir / mode
+    mode_dir = args.output_dir / args.mode
     make_output_dir(mode_dir)
     print(f"[INFO] Created mode directory: {mode_dir}")
 
     # Generate products based on the mode
-    generate_products(df_opera, mode, mode_dir)
-    
+    generate_products(df_opera, args.mode, mode_dir, args.layout_title)
+
     return
 
 if __name__ == "__main__":
