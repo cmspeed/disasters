@@ -505,8 +505,8 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date):
     )
 
     # === Add Grid Image ===
-    if layer == 'WTR':
-        color_palette = 'palettes/WTR.cpt'
+    if short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'WTR':
+        color_palette = 'palettes/DSWx-HLS_WTR.cpt'
         fig.grdimage(
             grid=grd,
             region=region_padded,
@@ -520,8 +520,38 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date):
             equalsize=1.5,
         )
 
-    elif layer == 'BWTR':
-        color_palette = 'palettes/BWTR.cpt'
+    elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'BWTR':
+        color_palette = 'palettes/DSWx-HLS_BWTR.cpt'
+        fig.grdimage(
+            grid=grd,
+            region=region_padded,
+            projection=projection,
+            cmap=color_palette,
+            frame=["WSne", 'xaf', 'yaf'],
+            nan_transparent=True
+        )
+        fig.colorbar(
+            cmap=color_palette,
+            equalsize=1.5,
+        )
+
+    elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'WTR':
+        color_palette = 'palettes/DSWx-S1_WTR.cpt'
+        fig.grdimage(
+            grid=grd,
+            region=region_padded,
+            projection=projection,
+            cmap=color_palette,
+            frame=["WSne", 'xaf', 'yaf'],
+            nan_transparent=True
+        )
+        fig.colorbar(
+            cmap=color_palette,
+            equalsize=1.5,
+        )
+
+    elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'BWTR':
+        color_palette = 'palettes/DSWx-S1_BWTR.cpt'
         fig.grdimage(
             grid=grd,
             region=region_padded,
