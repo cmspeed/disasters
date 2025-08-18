@@ -80,6 +80,11 @@ def parse_arguments():
         help="Title for the PDF layout(s). Must be enclosed in double quotes and is required."
     )
 
+    parser.add_argument(
+        "-fd", "--filter_date", type=str, required=False, default=None,
+        help="Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' mode."
+    )
+
     return parser.parse_args()
 
 def authenticate():
@@ -346,7 +351,7 @@ def filter_by_date_and_confidence(DS, DS_dates, date_threshold,
     for i, (da_data, da_date) in enumerate(zip(DS, DS_dates)):
         print(f"Filtering granule {i + 1}/{len(DS)}")
 
-        # Base mask
+        # Date mask
         date_mask = da_date >= date_threshold
 
         # Optional confidence mask
@@ -414,7 +419,7 @@ def compute_date_threshold(date_str):
 
     return date_threshold
 
-def generate_products(df_opera, mode, mode_dir, layout_title):
+def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     If the mode is "flood", the DSWx Confidence layer will be used to reclassify false snow/ice positives as water.
@@ -424,6 +429,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title):
         mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
         mode_dir (Path): Path to the directory where products will be saved.
         layout_title (str): Title for the PDF layout(s).
+        filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' mode.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
@@ -501,8 +507,12 @@ def generate_products(df_opera, mode, mode_dir, layout_title):
                     except Exception as e:
                         colormap = None
 
-                    # Compute the date_threshold using the date and DIST reference date (12/31/2020)
-                    date_threshold = compute_date_threshold(str(date))
+                    # Compute the date_threshold using either user-provided 'filter_date' or the date of the data acquistion
+                    # and DIST reference date (12/31/2020)
+                    if filter_date:
+                        date_threshold = compute_date_threshold(filter_date)
+                    else:
+                        date_threshold = compute_date_threshold(str(date))
 
                     # Filter DIST layers by date and confidence
                     DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
@@ -1048,7 +1058,7 @@ def main():
     print(f"[INFO] Created mode directory: {mode_dir}")
 
     # Generate products based on the mode
-    generate_products(df_opera, args.mode, mode_dir, args.layout_title)
+    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.filter_date)
 
     return
 
