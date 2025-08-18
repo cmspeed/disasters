@@ -1,11 +1,11 @@
 import os
 import argparse
+from datetime import datetime
 from pathlib import Path
 import pandas as pd
 from osgeo import gdal
 import next_pass
 import numpy as np
-import rasterio
 import rioxarray
 import xarray as xr
 
@@ -80,6 +80,11 @@ def parse_arguments():
         help="Title for the PDF layout(s). Must be enclosed in double quotes and is required."
     )
 
+    parser.add_argument(
+        "-fd", "--filter_date", type=str, required=False, default=None,
+        help="Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' mode."
+    )
+
     return parser.parse_args()
 
 def authenticate():
@@ -152,7 +157,7 @@ def read_opera_metadata_csv(output_dir):
     print(f"[INFO] Loaded {len(df)} rows from {csv_path}")
     return df
 
-def compile_and_load_data(data_layer_links, mode, conf_layer_links=None):
+def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
     """
     Compile and load data from the provided layer links for mosaicking. Also compile and load
     data for filtering (depending on whether it is provided).
@@ -160,8 +165,11 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None):
         data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
         mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
         conf_layer_links (list, optional): List of URLs for additional layers to filter false positives.
+        date_layer_links (list, optional): List of URLs for date layers to filter by date.
     Returns:
-        list: List of rioxarray datasets loaded from the provided links.
+        DS: List of rioxarray datasets loaded from the provided links.
+        conf_DS: List of rioxarray datasets for confidence layers (if applicable).
+        date_DS: List of rioxarray datasets for date layers (if applicable).
     Raises:
         Exception: If there is an error loading any of the datasets.
     """
@@ -201,7 +209,52 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None):
                     earthdata_password=password,
                 )
                 conf_DS.append(rioxarray.open_rasterio(f, masked=False))
+
+        # Sort conf_DS by most common crs for merging
+        crs_list = [str(ds.rio.crs) for ds in conf_DS]
+        crs_counter = Counter(crs_list)
+        most_common_crs_str, _ = crs_counter.most_common(1)[0]
+        conf_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
         return DS, conf_DS
+
+    # If conf_layer_links AND date_layer_links AND mode == 'fire' compile and load layers to use in filtering
+    if conf_layer_links and date_layer_links and mode == "fire":
+        conf_DS = []
+        date_DS = []
+        for link in conf_layer_links:
+            try:
+                conf_DS.append(rioxarray.open_rasterio(link, masked=False))
+            except Exception as e:
+                f = open_file(
+                    link,
+                    earthdata_username=username,
+                    earthdata_password=password,
+                )
+                conf_DS.append(rioxarray.open_rasterio(f, masked=False))
+        for link in date_layer_links:
+            try:
+                date_DS.append(rioxarray.open_rasterio(link, masked=False))
+            except Exception as e:
+                f = open_file(
+                    link,
+                    earthdata_username=username,
+                    earthdata_password=password,
+                )
+                date_DS.append(rioxarray.open_rasterio(f, masked=False))
+
+        # Sort conf_DS by most common crs for merging
+        crs_list = [str(ds.rio.crs) for ds in conf_DS]
+        crs_counter = Counter(crs_list)
+        most_common_crs_str, _ = crs_counter.most_common(1)[0]
+        conf_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
+
+        # Sort date_DS by most common crs for merging
+        crs_list = [str(ds.rio.crs) for ds in date_DS]
+        crs_counter = Counter(crs_list)
+        most_common_crs_str, _ = crs_counter.most_common(1)[0]
+        date_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
+
+        return DS, date_DS, conf_DS
     else:
         return DS
 
@@ -258,7 +311,115 @@ def reclassify_snow_ice_as_water(DS, conf_DS):
 
     return updated_list
 
-def generate_products(df_opera, mode, mode_dir, layout_title):
+def filter_by_date_and_confidence(DS, DS_dates, date_threshold,
+                                  DS_conf=None, confidence_threshold=None,
+                                  fill_value=None):
+    """
+    Filters each data xarray in `DS` based on:
+      - date threshold from `DS_dates`
+      - optional confidence threshold from `DS_conf`
+
+    Pixels not meeting the criteria are set to `fill_value`.
+    If `fill_value` is None, defaults to da_data.rio.nodata or NaN.
+
+    Parameters
+    ----------
+    DS : list of xr.DataArray
+        List of data granules (e.g., VEG-DIST-STATUS tiles).
+    DS_dates : list of xr.DataArray
+        List of corresponding date granules.
+    date_threshold : int or datetime-like
+        Pixels with dates >= this value are retained.
+    DS_conf : list of xr.DataArray, optional
+        List of confidence rasters corresponding to `DS`. Default is None.
+    confidence_threshold : float or int, optional
+        Pixels with confidence >= this value are retained.
+    fill_value : number, optional
+        Value to fill where condition is not met. If None, uses nodata or NaN.
+
+    Returns
+    -------
+    list of xr.DataArray
+        Filtered data granules.
+    """
+    assert len(DS) == len(DS_dates), "DS and DS_dates must be same length"
+    if DS_conf is not None:
+        assert len(DS_conf) == len(DS), "DS_conf must match DS in length"
+
+    filtered_list = []
+
+    for i, (da_data, da_date) in enumerate(zip(DS, DS_dates)):
+        print(f"Filtering granule {i + 1}/{len(DS)}")
+
+        # Date mask
+        date_mask = da_date >= date_threshold
+
+        # Optional confidence mask
+        if DS_conf is not None and confidence_threshold is not None:
+            conf_layer = DS_conf[i]
+            print(f"  Confidence layer shape: {conf_layer.shape}")
+            total_pixels = conf_layer.size
+
+            # Keep only low-confidence values (<= 100)
+            conf_mask = conf_layer >= confidence_threshold
+
+            retained_pixels = conf_mask.sum().item()
+            print(f"  Confidence retained: {retained_pixels} / {total_pixels} ({retained_pixels / total_pixels:.2%})")
+
+            max_retained_conf = conf_layer.where(conf_mask).max().item()
+            print(f"  Max confidence among retained pixels: {max_retained_conf}")
+
+            combined_mask = date_mask & conf_mask
+        else:
+            combined_mask = date_mask
+
+        # Determine fill value
+        default_nodata = (
+            da_data.rio.nodata
+            if hasattr(da_data, "rio") and da_data.rio.nodata is not None
+            else da_data.attrs.get("_FillValue", np.nan)
+        )
+        replacement = fill_value if fill_value is not None else default_nodata
+
+        # Apply mask
+        filtered = xr.where(combined_mask, da_data, replacement)
+
+        # Preserve metadata
+        filtered.attrs.update(da_data.attrs)
+
+        if hasattr(da_data, "rio"):
+            filtered = (
+                filtered.rio.write_nodata(replacement)
+                        .rio.write_crs(da_data.rio.crs)
+                        .rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=False)
+                        .rio.write_transform(da_data.rio.transform())
+            )
+
+        filtered_list.append(filtered)
+
+    return filtered_list
+
+def compute_date_threshold(date_str):
+    """
+    Compute the date threshold in days from a reference date (2020-12-31).
+    Args:
+        date_str (str): Date string in the format YYYY-MM-DD.
+    Returns:
+        date_threshold (int): Number of days from the reference date to the target date.
+    """
+    # Define the reference date and the target date
+    reference_date = datetime(2020, 12, 31)
+    target_date = datetime.strptime(date_str, "%Y-%m-%d")
+
+    # Calculate the difference between the two dates
+    delta = target_date - reference_date
+
+    # Get the number of days from the timedelta object
+    date_threshold = delta.days
+
+    return date_threshold
+
+def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     If the mode is "flood", the DSWx Confidence layer will be used to reclassify false snow/ice positives as water.
@@ -268,6 +429,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title):
         mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
         mode_dir (Path): Path to the directory where products will be saved.
         layout_title (str): Title for the PDF layout(s).
+        filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' mode.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
@@ -323,11 +485,37 @@ def generate_products(df_opera, mode, mode_dir, layout_title):
 
                 # Compile and load data
                 if mode == "fire":
-                    DS = compile_and_load_data(urls, mode)
+                    date_column = "Download URL VEG-DIST-DATE"
+                    conf_column = "Download URL VEG-DIST-CONF"
+                    date_layer_links = df_sn[date_column].dropna().tolist() if date_column in df_sn.columns else []
+                    conf_layer_links = df_sn[conf_column].dropna().tolist() if conf_column in df_sn.columns else []
+                    if not date_layer_links:
+                        print(f"[WARN] No VEG-DIST-DATE URLs found for {short_name} on {date}")
+                        date_DS = None
+                    else:
+                        print(f"[INFO] Found {len(date_layer_links)} VEG-DIST-DATE URLs")
+                    if not conf_layer_links:
+                        print(f"[WARN] No VEG-DIST-CONF URLs found for {short_name} on {date}")
+                        conf_DS = None
+                    else:
+                        print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
+                    DS, date_DS, conf_DS = compile_and_load_data(urls, mode,
+                                                                 conf_layer_links=conf_layer_links,
+                                                                 date_layer_links=date_layer_links)
                     try:
                         colormap = opera_mosaic.get_image_colormap(DS[0])
                     except Exception as e:
                         colormap = None
+
+                    # Compute the date_threshold using either user-provided 'filter_date' or the date of the data acquistion
+                    # and DIST reference date (12/31/2020)
+                    if filter_date:
+                        date_threshold = compute_date_threshold(filter_date)
+                    else:
+                        date_threshold = compute_date_threshold(str(date))
+
+                    # Filter DIST layers by date and confidence
+                    DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
                 
                 if mode == "flood":
                     conf_column = "Download URL CONF"
@@ -870,7 +1058,7 @@ def main():
     print(f"[INFO] Created mode directory: {mode_dir}")
 
     # Generate products based on the mode
-    generate_products(df_opera, args.mode, mode_dir, args.layout_title)
+    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.filter_date)
 
     return
 

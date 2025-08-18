@@ -49,6 +49,12 @@ python disaster.py -b 35 37 -115 -113 -o LakeMead -m flood -n 2 -lt "Lake Mead F
 ```bash
 python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire -lt "New Mexico Fires, June 2025"
 ```
+
+#### Example: Generate fire impact maps over a wildfire in Quebec using the most recent 30 OPERA products (prior to 07-31-2023), filtered to remove disturbance prior to 05-15-2023
+```bash
+python disaster.py -b 48 49.5 -77.5 -74.4 -o QuebecFires -m fire -d 2023-07-31 -n 30 -lt "Quebec Wildfire, Summer 2023" -fd 2023-05-15
+```
+
 ### Command-line Arguments
 
 | Argument             | Required | Description                                                                                   |
@@ -58,6 +64,7 @@ python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire -lt "New Mexico Fire
 | `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, or `earthquake`|
 | `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`) |
 | `-lt`, `--layout_title` | Yes     | Title of PDF layout generated for each product |
+| `-fd`, `--filter_date` | No     | Date to use as filter in `fire` mode to remove all disturbance preceding `filter_date` |
 
 ### Disaster Modes
 
