@@ -587,8 +587,10 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     # and DIST reference date (12/31/2020)
                     if filter_date:
                         date_threshold = compute_date_threshold(filter_date)
+                        layout_date = str(filter_date)
                     else:
                         date_threshold = compute_date_threshold(str(date))
+                        layout_date = str(date)
 
                     # Filter DIST layers by date and confidence
                     DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
@@ -653,8 +655,8 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 # Make a map with PyGMT
                 map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox)
 
-                # Make a layout with matplotlib
-                make_layout(layouts_dir, map_name, short_name, layer, date, layout_title)
+                # Make a PDF layout
+                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title)
         
     # Pair-wise differencing for 'fire' and 'flood' modes
     if mode in ("flood", "fire"):
@@ -1083,7 +1085,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
 
     return map_name
 
-def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
+def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title):
     """
     Create a layout using matplotlib for the provided map.
     Args:
@@ -1092,6 +1094,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         short_name (str): Short name of the product.
         layer (str): Layer name to be used in the layout.
         date (str): Date string in the format YYYY-MM-DD.
+        layout_date (str): Date threshold in the format YYYY-MM-DD.
         layout_title (str): Title for the layout.
     """
     import matplotlib.pyplot as plt
@@ -1158,7 +1161,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         map_information = (
             f"The ARIA/OPERA surface disturbance alert map is derived from an OPERA DIST-ALERT-S1 mosaicked "
             f"product from Copernicus Sentinel-1 data."
-            f"This map depicts regions of surface disturbance."
+            f"This map depicts regions of surface disturbance since "+layout_date+"."
         )
         data_source = "Copernicus Sentinel-1"
 
@@ -1167,7 +1170,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
             map_information = (
             f"The ARIA/OPERA surface disturbance alert map is derived from an OPERA DIST-ALERT-HLS mosaicked "
             f"product from Harmonized Landsat and Sentinel-2 data."
-            f"This map depicts regions of vegetation disturbance."
+            f"This map depicts regions of vegetation disturbance since "+layout_date+"."
             )
             data_source = "Copernicus Harmonized Landsat and Sentinel-2"
 
