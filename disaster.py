@@ -559,6 +559,8 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 print(f"[INFO] Processing {short_name} - {layer} on {date}")
                 print(f"Found {len(urls)} URLs")
 
+                layout_date = ''
+
                 # Compile and load data
                 if mode == "fire":
                     date_column = "Download URL VEG-DIST-DATE"
@@ -1142,7 +1144,8 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
         subtitle = "OPERA Dynamic Surface Water eXtent from Sentinel-1 (DSWx-S1)"
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-S1 mosaicked "
-            f"product from Copernicus Sentinel-1 data."
+            f"product from Copernicus Sentinel-1 data. False snow/ice positive pixels "
+            f"were reclassified as water using the associated confidence layers."
             f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Sentinel-1"
@@ -1151,8 +1154,9 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
         subtitle = "OPERA Dynamic Surface Water eXtent from HLS (DSWx-HLS)"
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
-            f"product from Harmonized Landsat and Sentinel-2 data."
-            f"This map depicts regions of vegetation disturbance."
+            f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
+            f"were reclassified as water using the associated confidence layers."
+            f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Harmonized Landsat and Sentinel-2"
         
