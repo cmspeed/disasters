@@ -483,6 +483,8 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
                 print(f"[INFO] Processing {short_name} - {layer} on {date}")
                 print(f"Found {len(urls)} URLs")
 
+                layout_date = ''
+
                 # Compile and load data
                 if mode == "fire":
                     date_column = "Download URL VEG-DIST-DATE"
@@ -511,8 +513,10 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
                     # and DIST reference date (12/31/2020)
                     if filter_date:
                         date_threshold = compute_date_threshold(filter_date)
+                        layout_date = str(filter_date)
                     else:
                         date_threshold = compute_date_threshold(str(date))
+                        layout_date = str(date)
 
                     # Filter DIST layers by date and confidence
                     DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
@@ -565,7 +569,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
                 map_name = make_map(maps_dir, mosaic_path, short_name, layer, date)
 
                 # Make a layout with matplotlib
-                make_layout(layouts_dir, map_name, short_name, layer, date, layout_title)
+                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title)
 
     return
 
@@ -843,7 +847,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date):
 
     return map_name
 
-def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
+def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title):
     """
     Create a layout using matplotlib for the provided map.
     Args:
@@ -852,6 +856,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         short_name (str): Short name of the product.
         layer (str): Layer name to be used in the layout.
         date (str): Date string in the format YYYY-MM-DD.
+        layout_date (str): Date threshold in the format YYYY-MM-DD.
         layout_title (str): Title for the layout.
     """
     import matplotlib.pyplot as plt
@@ -899,7 +904,8 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         subtitle = "OPERA Dynamic Surface Water eXtent from Sentinel-1 (DSWx-S1)"
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-S1 mosaicked "
-            f"product from Copernicus Sentinel-1 data."
+            f"product from Copernicus Sentinel-1 data. False snow/ice positive pixels "
+            f"were reclassified as water using the associated confidence layers."
             f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Sentinel-1"
@@ -908,8 +914,9 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         subtitle = "OPERA Dynamic Surface Water eXtent from HLS (DSWx-HLS)"
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
-            f"product from Harmonized Landsat and Sentinel-2 data."
-            f"This map depicts regions of vegetation disturbance."
+            f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
+            f"were reclassified as water using the associated confidence layers."
+            f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Harmonized Landsat and Sentinel-2"
         
@@ -918,7 +925,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         map_information = (
             f"The ARIA/OPERA surface disturbance alert map is derived from an OPERA DIST-ALERT-S1 mosaicked "
             f"product from Copernicus Sentinel-1 data."
-            f"This map depicts regions of surface disturbance."
+            f"This map depicts regions of surface disturbance since "+layout_date+"."
         )
         data_source = "Copernicus Sentinel-1"
 
@@ -927,7 +934,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
             map_information = (
             f"The ARIA/OPERA surface disturbance alert map is derived from an OPERA DIST-ALERT-HLS mosaicked "
             f"product from Harmonized Landsat and Sentinel-2 data."
-            f"This map depicts regions of vegetation disturbance."
+            f"This map depicts regions of vegetation disturbance since "+layout_date+"."
             )
             data_source = "Copernicus Harmonized Landsat and Sentinel-2"
 
