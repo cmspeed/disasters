@@ -1,4 +1,5 @@
 import os
+import json
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ import next_pass
 import numpy as np
 import rioxarray
 import xarray as xr
+from collections import defaultdict
 
 def parse_arguments():
     """
@@ -559,7 +561,10 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
                 # Overwrite original with compressed version
                 os.replace(tmp_path, mosaic_path)
 
-                print(f"[INFO] Mosaic written to: {mosaic_path}")
+                # Convert to COG
+                save_gtiff_as_cog(mosaic_path)
+
+                print(f"[INFO] Mosaic written as COG: {mosaic_path}")
 
                 # Make a map with PyGMT
                 map_name = make_map(maps_dir, mosaic_path, short_name, layer, date)
@@ -1020,6 +1025,33 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
     layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
     return 
+
+def save_gtiff_as_cog(path: Path):
+    """
+    Convert a GeoTIFF to a Cloud Optimized GeoTIFF (COG) in place.
+    Overwrites the original file.
+    """
+    ds = gdal.Open(str(path))
+    if ds is None:
+        raise RuntimeError(f"Could not open {path} for COG translation")
+
+    creation_opts = [
+        "COMPRESS=DEFLATE",
+        "PREDICTOR=2",
+        "TILED=YES",
+        "BLOCKSIZE=512",
+        "OVERVIEWS=IGNORE_EXISTING",
+        "LEVEL=9",
+        "BIGTIFF=IF_SAFER",
+        "SPARSE_OK=YES",
+        "RESAMPLING=AVERAGE"
+    ]
+    gdal.Translate(
+        destName=str(path),
+        srcDS=ds,
+        format="COG",
+        creationOptions=creation_opts
+    )
 
 def main():
     """
