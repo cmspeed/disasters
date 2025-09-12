@@ -7,6 +7,7 @@ import pandas as pd
 from osgeo import gdal
 import next_pass
 import numpy as np
+import rasterio
 import rioxarray
 import xarray as xr
 from collections import defaultdict
@@ -421,6 +422,69 @@ def compute_date_threshold(date_str):
 
     return date_threshold
 
+def same_utm_zone(crs_a: rasterio.crs.CRS, crs_b: rasterio.crs.CRS) -> bool:
+    """
+    Returns True if both are projected UTM with the same EPSG (e.g., 32611 vs 32611).
+    """
+    try:
+        if not crs_a or not crs_b:
+            return False
+        epsg_a = crs_a.to_epsg()
+        epsg_b = crs_b.to_epsg()
+        if epsg_a is None or epsg_b is None:
+            return False
+        # UTM EPSGs are typically 326xx (north) / 327xx (south)
+        return epsg_a == epsg_b and (str(epsg_a).startswith("326") or str(epsg_a).startswith("327"))
+    except Exception:
+        return False
+
+def compute_and_write_difference(
+    earlier_path: Path,
+    later_path: Path,
+    out_path: Path,
+    nodata_value: float | int | None = None,
+    ):
+    """
+    Create a difference raster: (later - earlier), aligned to the 'later' grid.
+    If either pixel is nodata in the inputs, output nodata at that pixel.
+    Writes a COG to out_path via the save_gtiff_as_cog helper.
+    """
+    import xarray as xr
+    import rioxarray
+
+    da_later = rioxarray.open_rasterio(later_path, masked=True)
+    da_early = rioxarray.open_rasterio(earlier_path, masked=True)
+    
+    nd = nodata_value
+    if nd is None:
+        nd = da_later.rio.nodata
+        if nd is None:
+            nd = da_early.rio.nodat
+
+    # Compute difference with nodata propagation: if either is nodata -> output nodata
+    mask = xr.where(
+        xr.ufuncs.isnan(da_later) | xr.ufuncs.isnan(da_early),
+        True,
+        False,
+    )
+    
+    diff = da_later - da_early
+
+    if nd is not None:
+        diff = xr.where(mask, nd, diff)
+        diff.rio.write_nodata(nd, encoded=True, inplace=True)
+        diff.rio.write_crs(da_later.rio.crs, inplace=True)
+
+    tmp_gtiff = out_path.with_suffix(".tmp.tif")
+    diff.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True)
+
+    save_gtiff_as_cog(tmp_gtiff, out_path)
+
+    try:
+        tmp_gtiff.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
@@ -463,6 +527,9 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
     df_opera['Start Time'] = pd.to_datetime(df_opera['Start Time'], errors='coerce')
     df_opera['Start Date'] = df_opera['Start Time'].dt.date.astype(str)
     unique_dates = df_opera['Start Date'].dropna().unique()
+
+    # Create an index of mosaics created for use in pair-wise differencing
+    mosaic_index = defaultdict(lambda: defaultdict(dict))
 
     for date in unique_dates:
         df_on_date = df_opera[df_opera['Start Date'] == date]
@@ -546,31 +613,103 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
                 mosaic_path = data_dir / mosaic_name
                 tmp_path = data_dir / f"tmp_{mosaic_name}"
 
-                # Save the mosaic to the mode directory
-                copy(image, mosaic_path, driver='GTiff')
+                # Save the mosaic to a temporary GeoTIFF
+                copy(image, tmp_path, driver="GTiff")
 
-                # Reproject/compress using GDAL
+                # Reproject/compress using GDAL directly into the final GeoTIFF
                 gdal.Warp(
-                    tmp_path,
                     mosaic_path,
+                    tmp_path,
                     xRes=30,
                     yRes=30,
-                    creationOptions=["COMPRESS=DEFLATE"]
+                    creationOptions=["COMPRESS=DEFLATE"],
                 )
 
-                # Overwrite original with compressed version
-                os.replace(tmp_path, mosaic_path)
-
-                # Convert to COG
-                save_gtiff_as_cog(mosaic_path)
+                # Convert to COG (writes back into mosaic_path)
+                save_gtiff_as_cog(mosaic_path, mosaic_path)
 
                 print(f"[INFO] Mosaic written as COG: {mosaic_path}")
+
+                # Clean up tmp file
+                if tmp_path.exists():
+                    tmp_path.unlink()
+
+                # Add info to the mosiac index for pair-wise differencing
+                with rasterio.open(mosaic_path) as ds:
+                    mosaic_crs = ds.crs
+
+                mosaic_index[short_name][layer][str(date)] = {
+                    "path": mosaic_path,
+                    "crs": mosaic_crs
+                }
 
                 # Make a map with PyGMT
                 map_name = make_map(maps_dir, mosaic_path, short_name, layer, date)
 
                 # Make a layout with matplotlib
                 make_layout(layouts_dir, map_name, short_name, layer, date, layout_title)
+        
+    # Pair-wise differencing for 'fire' and 'flood' modes
+    if mode in ("flood", "fire"):
+        print("[INFO] Computing pairwise differences...")
+        skipped = []  # collect CRS/UTM mismatches
+
+        for short_name_k, layers_dict in mosaic_index.items():
+            for layer_k, date_map in layers_dict.items():
+                # all unique dates for which mosaics exist for this (short_name, layer)
+                dates = sorted(date_map.keys())  
+
+                # Generate difference for all possible pairs
+                for i in range(len(dates)):
+                    for j in range(i + 1, len(dates)):
+                        d_early = dates[i]
+                        d_later = dates[j]
+
+                        early_info = date_map[d_early]
+                        later_info = date_map[d_later]
+
+                        # UTM/CRS check (skip the pair if different or unknown UTM zones)
+                        crs_a = early_info["crs"]
+                        crs_b = later_info["crs"]
+                        if not same_utm_zone(crs_a, crs_b):
+                            skipped.append({
+                                "short_name": short_name_k,
+                                "layer": layer_k,
+                                "date_earlier": d_early,
+                                "date_later": d_later,
+                                "crs_earlier": crs_a.to_string() if crs_a else None,
+                                "crs_later": crs_b.to_string() if crs_b else None,
+                                "reason": "different or unknown UTM zone"
+                            })
+                            continue
+
+                        # Name and path: {short}_{layer}_{LATER}_minus_{EARLIER}_diff.tif
+                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_minus_{d_early}_diff.tif"
+                        diff_path = (mode_dir / "data") / diff_name
+
+                        try:
+                            compute_and_write_difference(
+                                earlier_path=early_info["path"],
+                                later_path=later_info["path"],
+                                out_path=diff_path,
+                                nodata_value=None
+                            )
+                            print(f"[INFO] Wrote diff COG: {diff_path}")
+                        except Exception as e:
+                            skipped.append({
+                                "short_name": short_name_k,
+                                "layer": layer_k,
+                                "date_earlier": d_early,
+                                "date_later": d_later,
+                                "error": str(e),
+                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
+                            })
+
+        # Report skipped pairs due to CRS/UTM differences or errors
+        report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
+        with open(report_path, "w") as f:
+            json.dump(skipped, f, indent=2)
+        print(f"[INFO] Difference skip report: {report_path} ({len(skipped)} skipped)")
 
     return
 
@@ -1026,19 +1165,21 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
     return 
 
-def save_gtiff_as_cog(path: Path):
-    """
-    Convert a GeoTIFF to a Cloud Optimized GeoTIFF (COG) in place.
-    Overwrites the original file.
-    """
-    ds = gdal.Open(str(path))
+def save_gtiff_as_cog(src_path: Path, dst_path: Path | None = None):
+    if dst_path is None or src_path == dst_path:
+        tmp_path = src_path.with_suffix(".cog.tmp.tif")
+        dst_path = tmp_path
+        in_place = True
+    else:
+        in_place = False
+
+    ds = gdal.Open(str(src_path))
     if ds is None:
-        raise RuntimeError(f"Could not open {path} for COG translation")
+        raise RuntimeError(f"Could not open {src_path} for COG translation")
 
     creation_opts = [
         "COMPRESS=DEFLATE",
         "PREDICTOR=2",
-        "TILED=YES",
         "BLOCKSIZE=512",
         "OVERVIEWS=IGNORE_EXISTING",
         "LEVEL=9",
@@ -1046,12 +1187,10 @@ def save_gtiff_as_cog(path: Path):
         "SPARSE_OK=YES",
         "RESAMPLING=AVERAGE"
     ]
-    gdal.Translate(
-        destName=str(path),
-        srcDS=ds,
-        format="COG",
-        creationOptions=creation_opts
-    )
+    gdal.Translate(str(dst_path), ds, format="COG", creationOptions=creation_opts)
+
+    if in_place:
+        os.replace(dst_path, src_path)
 
 def main():
     """
