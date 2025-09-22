@@ -485,7 +485,7 @@ def compute_and_write_difference(
     except Exception:
         pass
 
-def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
+def generate_products(df_opera, mode, mode_dir, layout_title, bbox, filter_date=None):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     If the mode is "flood", the DSWx Confidence layer will be used to reclassify false snow/ice positives as water.
@@ -495,6 +495,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
         mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
         mode_dir (Path): Path to the directory where products will be saved.
         layout_title (str): Title for the PDF layout(s).
+        bbox (list): Bounding box in the form [South, North, West, East].
         filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' mode.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
@@ -644,7 +645,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
                 }
 
                 # Make a map with PyGMT
-                map_name = make_map(maps_dir, mosaic_path, short_name, layer, date)
+                map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox)
 
                 # Make a layout with matplotlib
                 make_layout(layouts_dir, map_name, short_name, layer, date, layout_title)
@@ -684,7 +685,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, filter_date=None):
                             continue
 
                         # Name and path: {short}_{layer}_{LATER}_minus_{EARLIER}_diff.tif
-                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_minus_{d_early}_diff.tif"
+                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_diff.tif"
                         diff_path = (mode_dir / "data") / diff_name
 
                         try:
@@ -773,7 +774,7 @@ def expand_region_to_aspect(region, target_aspect):
 
     return [xmin, xmax, ymin, ymax]
 
-def make_map(maps_dir, mosaic_path, short_name, layer, date):
+def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox):
     """
     Create a map using PyGMT from the provided mosaic path.
     Args:
@@ -782,6 +783,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date):
         short_name (str): Short name of the product.
         layer (str): Layer name to be used in the map.
         date (str): Date string in the format YYYY-MM-DD.
+        bbox (list): Bounding box in the form [South, North, West, East].
     Returns:
         map_name (Path): Path to the saved map image.
     Raises:
@@ -807,9 +809,8 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date):
     grd = grd.where(grd != 255)  # Remove nodata values
 
     # === Region ===
-    bounds = grd.rio.bounds()  # xmin, ymin, xmax, ymax
-    region = [bounds[0], bounds[2], bounds[1], bounds[3]]  # [xmin, xmax, ymin, ymax]
-
+    region = [bbox[2], bbox[3], bbox[0], bbox[1]]  # [xmin, xmax, ymin, ymax]
+    
     # === Define Target Aspect Ratio ===
     # To match matplotlib layout: extent=[0, 60, 0, 100] → aspect ratio = width / height
     target_aspect = 60 / 100
@@ -1229,7 +1230,7 @@ def main():
     print(f"[INFO] Created mode directory: {mode_dir}")
 
     # Generate products based on the mode
-    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.filter_date)
+    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.bbox, args.filter_date)
 
     return
 
