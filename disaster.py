@@ -44,6 +44,11 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "-zb", "--zoom_bbox", nargs=4, type=float, metavar=("S", "N", "W", "E"),
+        required=False, default=None, help="Optional bounding box for the zoom-in inset map."
+    )
+
+    parser.add_argument(
         "-o", "--output_dir", type=Path, required=True,
         help="Path to the directory where results and metadata will be saved."
     )
@@ -485,7 +490,7 @@ def compute_and_write_difference(
     except Exception:
         pass
 
-def generate_products(df_opera, mode, mode_dir, layout_title, bbox, filter_date=None):
+def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, filter_date=None):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     If the mode is "flood", the DSWx Confidence layer will be used to reclassify false snow/ice positives as water.
@@ -496,6 +501,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, filter_date=
         mode_dir (Path): Path to the directory where products will be saved.
         layout_title (str): Title for the PDF layout(s).
         bbox (list): Bounding box in the form [South, North, West, East].
+        zoom_bbox (list): Optional bounding box for the zoom-in inset map in the form [South, North, West, East].
         filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' mode.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
@@ -645,7 +651,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, filter_date=
                 }
 
                 # Make a map with PyGMT
-                map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox)
+                map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox)
 
                 # Make a layout with matplotlib
                 make_layout(layouts_dir, map_name, short_name, layer, date, layout_title)
@@ -774,7 +780,7 @@ def expand_region_to_aspect(region, target_aspect):
 
     return [xmin, xmax, ymin, ymax]
 
-def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox):
+def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=None):
     """
     Create a map using PyGMT from the provided mosaic path.
     Args:
@@ -784,6 +790,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox):
         layer (str): Layer name to be used in the map.
         date (str): Date string in the format YYYY-MM-DD.
         bbox (list): Bounding box in the form [South, North, West, East].
+        zoom_bbox (list, optional): Bounding box for the zoom-in inset map, in the form [South, North, West, East].
     Returns:
         map_name (Path): Path to the saved map image.
     Raises:
@@ -949,13 +956,13 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox):
 
     bounds = grd.rio.bounds()
     region = [bounds[0], bounds[2], bounds[1], bounds[3]]
-    region_expanded = expand_region(region, width_deg=25, height_deg=15)
+    region_expanded_main = expand_region(region, width_deg=25, height_deg=15)
 
-    # === Add Inset Map ===
+    # === Add Inset Map (regional context) ===
     with fig.inset(
         position="jBL+o0.2c/0.2c",
         box="+pblack",
-        region=region_expanded,
+        region=region_expanded_main,
         projection="M5c",
     ):
         # Use a plotting method to create a figure inside the inset.
@@ -972,7 +979,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox):
             [xmax, ymin],
             [xmax, ymax],
             [xmin, ymax],
-            [xmin, ymin],  # Close the loop
+            [xmin, ymin],
         ]
 
         # Plot the rectangle on the inset
@@ -980,6 +987,94 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox):
             x=[pt[0] for pt in rectangle],
             y=[pt[1] for pt in rectangle],
             pen="2p,red"
+        )
+
+    # Optional inset for the zoom-in bbox (bottom right, include a scalebar)
+    if zoom_bbox:
+        zoom_region = [zoom_bbox[2], zoom_bbox[3], zoom_bbox[0], zoom_bbox[1]]
+
+        # Calculate scale bar length for the zoom inset
+        xmin_z, xmax_z, ymin_z, ymax_z = zoom_region
+        center_lat_z = (ymin_z + ymax_z) / 2
+        
+        _, _, distance_m_z = geod.inv(xmin_z, center_lat_z, xmax_z, center_lat_z)
+        raw_length_km_z = distance_m_z * 0.25 / 1000 # 25% of inset width in km
+
+        scalebar_length_km_z = 1 # Default fallback
+        if raw_length_km_z > 0:
+            exponent_z = math.floor(math.log10(raw_length_km_z))
+            base_z = 10 ** exponent_z
+
+            for factor in [1, 2, 5, 10]:
+                scalebar_length_z = base_z * factor
+                if scalebar_length_z >= raw_length_km_z:
+                    scalebar_length_km_z = scalebar_length_z
+                    break
+
+        with fig.inset(
+            position="jBR+o0.5c/1.5c", # Bottom-Right (jBR), offset (o) 0.5cm horizontal, 1.5cm vertical
+            box="+pblack",
+            region=zoom_region,
+            projection="M5c", # Use the same size as the main inset
+        ):
+            # Re-plot the data for the inset map
+            if short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'WTR':
+                fig.grdimage(
+                    grid=grd,
+                    region=zoom_region,
+                    projection="M5c",
+                    cmap=color_palette,
+                    nan_transparent=True
+                )
+            elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'BWTR':
+                fig.grdimage(
+                    grid=grd,
+                    region=zoom_region,
+                    projection="M5c",
+                    cmap=color_palette,
+                    nan_transparent=True
+                )
+            elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'WTR':
+                fig.grdimage(
+                    grid=grd,
+                    region=zoom_region,
+                    projection="M5c",
+                    cmap=color_palette,
+                    nan_transparent=True
+                )
+            elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'BWTR':
+                fig.grdimage(
+                    grid=grd,
+                    region=zoom_region,
+                    projection="M5c",
+                    cmap=color_palette,
+                    nan_transparent=True
+                )
+            elif layer == "VEG-ANOM-MAX":
+                fig.grdimage(
+                    grid=grd,
+                    region=zoom_region,
+                    projection="M5c",
+                    cmap=color_palette,
+                    nan_transparent=True
+                )
+            elif layer == "VEG-DIST-STATUS":
+                fig.grdimage(
+                    grid=grd,
+                    region=zoom_region,
+                    projection="M5c",
+                    cmap=color_palette,
+                    nan_transparent=True
+                )
+            
+            # Add scale bar to the inset map. Use Bottom-Left (jBL) inside the inset frame.
+            fig.basemap(map_scale=f"jBL+w{scalebar_length_km_z:.0f}k+o0.2c/0.7c")
+            
+        # Plot a rectangle on the main map to show the zoom area
+        fig.plot(
+            x=[zoom_region[0], zoom_region[1], zoom_region[1], zoom_region[0], zoom_region[0]],
+            y=[zoom_region[2], zoom_region[2], zoom_region[3], zoom_region[3], zoom_region[2]],
+            pen="2p,magenta"
         )
 
     # # === Export Map with Consistent Aspect Ratio ===
@@ -1230,7 +1325,7 @@ def main():
     print(f"[INFO] Created mode directory: {mode_dir}")
 
     # Generate products based on the mode
-    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.bbox, args.filter_date)
+    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.bbox, args.zoom_bbox, args.filter_date)
 
     return
 
