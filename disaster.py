@@ -268,7 +268,7 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
 
 def reclassify_snow_ice_as_water(DS, conf_DS):
     """
-    Reclassify false snow/ice positives (value 252) as water (value 1) based on the confidence layers.
+    Reclassify false snow/ice positives (value 252) as water (value 1) based on the confidence layers. Only applicable for DSWx-HLS.
     
     Args:
         DS (list): List of rioxarray datasets (BWTR layers).
@@ -493,8 +493,8 @@ def compute_and_write_difference(
 def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, filter_date=None):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
-    If the mode is "flood", the DSWx Confidence layer will be used to reclassify false snow/ice positives as water.
-    This approach is specific to flood mode and will not be applied for other modes (i.e, fire or earthquake). 
+    If the mode is "flood", the DSWx-HLS Confidence layer will be used to reclassify false snow/ice positives as water in DSWx-HLS products ONLY.
+    This approach is specific to flood mode and will not be applied for other modes (i.e, fire or earthquake).
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
         mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
@@ -612,8 +612,14 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     except Exception as e:
                         colormap = None
                 
-                    # Reclassify false snow/ice positives
-                    DS = reclassify_snow_ice_as_water(DS, conf_DS)
+                    # Reclassify false snow/ice positives in DSWX-HLS only
+                    if (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "BWTR") or (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "WTR"):
+                        if conf_DS is None:
+                            print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
+                            continue
+                        else:
+                            print("[INFO] Reclassifying false snow/ice positives as water based on CONF layers")
+                            DS = reclassify_snow_ice_as_water(DS, conf_DS)
 
                 # Mosaic the datasets using the appropriate method/rule
                 mosaic, _, nodata = opera_mosaic.mosaic_opera(DS, product=short_name, merge_args={})
@@ -1144,8 +1150,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
         subtitle = "OPERA Dynamic Surface Water eXtent from Sentinel-1 (DSWx-S1)"
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-S1 mosaicked "
-            f"product from Copernicus Sentinel-1 data. False snow/ice positive pixels "
-            f"were reclassified as water using the associated confidence layers."
+            f"product from Copernicus Sentinel-1 data."
             f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Sentinel-1"
@@ -1155,7 +1160,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
             f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
-            f"were reclassified as water using the associated confidence layers."
+            f"were reclassified as water using the associated DSWx-HLS Confidence layer."
             f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Harmonized Landsat and Sentinel-2"
