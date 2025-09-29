@@ -268,7 +268,7 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
 
 def reclassify_snow_ice_as_water(DS, conf_DS):
     """
-    Reclassify false snow/ice positives (value 252) as water (value 1) based on the confidence layers.
+    Reclassify false snow/ice positives (value 252) as water (value 1) based on the confidence layers. Only applicable for DSWx-HLS.
     
     Args:
         DS (list): List of rioxarray datasets (BWTR layers).
@@ -493,8 +493,8 @@ def compute_and_write_difference(
 def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, filter_date=None):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
-    If the mode is "flood", the DSWx Confidence layer will be used to reclassify false snow/ice positives as water.
-    This approach is specific to flood mode and will not be applied for other modes (i.e, fire or earthquake). 
+    If the mode is "flood", the DSWx-HLS Confidence layer will be used to reclassify false snow/ice positives as water in DSWx-HLS products ONLY.
+    This approach is specific to flood mode and will not be applied for other modes (i.e, fire or earthquake).
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
         mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
@@ -559,6 +559,8 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 print(f"[INFO] Processing {short_name} - {layer} on {date}")
                 print(f"Found {len(urls)} URLs")
 
+                layout_date = ''
+
                 # Compile and load data
                 if mode == "fire":
                     date_column = "Download URL VEG-DIST-DATE"
@@ -587,8 +589,10 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     # and DIST reference date (12/31/2020)
                     if filter_date:
                         date_threshold = compute_date_threshold(filter_date)
+                        layout_date = str(filter_date)
                     else:
                         date_threshold = compute_date_threshold(str(date))
+                        layout_date = str(date)
 
                     # Filter DIST layers by date and confidence
                     DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
@@ -608,8 +612,14 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     except Exception as e:
                         colormap = None
                 
-                    # Reclassify false snow/ice positives
-                    DS = reclassify_snow_ice_as_water(DS, conf_DS)
+                    # Reclassify false snow/ice positives in DSWX-HLS only
+                    if (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "BWTR") or (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "WTR"):
+                        if conf_DS is None:
+                            print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
+                            continue
+                        else:
+                            print("[INFO] Reclassifying false snow/ice positives as water based on CONF layers")
+                            DS = reclassify_snow_ice_as_water(DS, conf_DS)
 
                 # Mosaic the datasets using the appropriate method/rule
                 mosaic, _, nodata = opera_mosaic.mosaic_opera(DS, product=short_name, merge_args={})
@@ -653,8 +663,8 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 # Make a map with PyGMT
                 map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox)
 
-                # Make a layout with matplotlib
-                make_layout(layouts_dir, map_name, short_name, layer, date, layout_title)
+                # Make a PDF layout
+                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title)
         
     # Pair-wise differencing for 'fire' and 'flood' modes
     if mode in ("flood", "fire"):
@@ -1083,7 +1093,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
 
     return map_name
 
-def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
+def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title):
     """
     Create a layout using matplotlib for the provided map.
     Args:
@@ -1092,6 +1102,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         short_name (str): Short name of the product.
         layer (str): Layer name to be used in the layout.
         date (str): Date string in the format YYYY-MM-DD.
+        layout_date (str): Date threshold in the format YYYY-MM-DD.
         layout_title (str): Title for the layout.
     """
     import matplotlib.pyplot as plt
@@ -1148,8 +1159,9 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         subtitle = "OPERA Dynamic Surface Water eXtent from HLS (DSWx-HLS)"
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
-            f"product from Harmonized Landsat and Sentinel-2 data."
-            f"This map depicts regions of vegetation disturbance."
+            f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
+            f"were reclassified as water using the associated DSWx-HLS Confidence layer."
+            f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Harmonized Landsat and Sentinel-2"
         
@@ -1158,7 +1170,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
         map_information = (
             f"The ARIA/OPERA surface disturbance alert map is derived from an OPERA DIST-ALERT-S1 mosaicked "
             f"product from Copernicus Sentinel-1 data."
-            f"This map depicts regions of surface disturbance."
+            f"This map depicts regions of surface disturbance since "+layout_date+"."
         )
         data_source = "Copernicus Sentinel-1"
 
@@ -1167,7 +1179,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_title):
             map_information = (
             f"The ARIA/OPERA surface disturbance alert map is derived from an OPERA DIST-ALERT-HLS mosaicked "
             f"product from Harmonized Landsat and Sentinel-2 data."
-            f"This map depicts regions of vegetation disturbance."
+            f"This map depicts regions of vegetation disturbance since "+layout_date+"."
             )
             data_source = "Copernicus Harmonized Landsat and Sentinel-2"
 
