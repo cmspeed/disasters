@@ -666,9 +666,9 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 # Make a PDF layout
                 make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title)
         
-    # Pair-wise differencing for 'fire' and 'flood' modes
-    if mode in ("flood", "fire"):
-        print("[INFO] Computing pairwise differences...")
+    # Pair-wise differencing for 'flood' mode
+    if mode in ("flood"):
+        print("[INFO] Computing pairwise differences between water products...")
         skipped = []  # collect CRS/UTM mismatches
 
         for short_name_k, layers_dict in mosaic_index.items():
@@ -1160,7 +1160,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
             f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
-            f"were reclassified as water using the associated DSWx-HLS Confidence layer."
+            f"were reclassified as water using the associated DSWx-HLS Confidence layer. "
             f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Harmonized Landsat and Sentinel-2"
@@ -1178,7 +1178,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
             subtitle = "OPERA Surface Disturbance Alert from Harmonized Landsat and Sentinel-2 (DIST-ALERT-HLS)"
             map_information = (
             f"The ARIA/OPERA surface disturbance alert map is derived from an OPERA DIST-ALERT-HLS mosaicked "
-            f"product from Harmonized Landsat and Sentinel-2 data."
+            f"product from Harmonized Landsat and Sentinel-2 data. "
             f"This map depicts regions of vegetation disturbance since "+layout_date+"."
             )
             data_source = "Copernicus Harmonized Landsat and Sentinel-2"
