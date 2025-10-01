@@ -34,7 +34,7 @@ def parse_arguments():
         "WTR", "BWTR", "VEG-ANOM-MAX", "VEG-DIST-STATUS"
     ]
 
-    valid_modes = ["flood","fire","earthquake"]
+    valid_modes = ["flood", "fire", "landslide", "earthquake"]
 
     valid_functions = ["opera_search", "both"]
 
@@ -75,7 +75,7 @@ def parse_arguments():
 
     parser.add_argument(
         "-m", "--mode", type=str, default="flood", choices=valid_modes,
-        help="Mode of operation: flood, fire, earthquake. Default is 'flood'."
+        help="Mode of operation: flood, fire, landslide, earthquake. Default is 'flood'."
     )
 
     parser.add_argument(
@@ -494,15 +494,15 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     If the mode is "flood", the DSWx-HLS Confidence layer will be used to reclassify false snow/ice positives as water in DSWx-HLS products ONLY.
-    This approach is specific to flood mode and will not be applied for other modes (i.e, fire or earthquake).
+    This approach is specific to flood mode and will not be applied for other modes (i.e, fire, landslide, or earthquake).
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
-        mode (str): Mode of operation, e.g., "flood", "fire", "earthquake".
+        mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
         mode_dir (Path): Path to the directory where products will be saved.
         layout_title (str): Title for the PDF layout(s).
         bbox (list): Bounding box in the form [South, North, West, East].
         zoom_bbox (list): Optional bounding box for the zoom-in inset map in the form [South, North, West, East].
-        filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' mode.
+        filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' and 'landslide' mode.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
@@ -527,6 +527,9 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
     elif mode == "fire":
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
         layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
+    elif mode == "landslide":
+        short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
+        layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS", "S1A_VV", "S1A_VH"]
     elif mode == "earthquake":
         print("Earthquake mode coming soon. Exiting...")
         return
@@ -597,6 +600,48 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     # Filter DIST layers by date and confidence
                     DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
                 
+                elif mode == "landslide":
+                    if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
+                        date_column = "Download URL VEG-DIST-DATE"
+                        conf_column = "Download URL VEG-DIST-CONF"
+                        date_layer_links = df_sn[date_column].dropna().tolist() if date_column in df_sn.columns else []
+                        conf_layer_links = df_sn[conf_column].dropna().tolist() if conf_column in df_sn.columns else []
+                        if not date_layer_links:
+                            print(f"[WARN] No VEG-DIST-DATE URLs found for {short_name} on {date}")
+                            date_DS = None
+                        else:
+                            print(f"[INFO] Found {len(date_layer_links)} VEG-DIST-DATE URLs")
+                        if not conf_layer_links:
+                            print(f"[WARN] No VEG-DIST-CONF URLs found for {short_name} on {date}")
+                            conf_DS = None
+                        else:
+                            print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
+                        DS, date_DS, conf_DS = compile_and_load_data(urls, mode,
+                                                                     conf_layer_links=conf_layer_links,
+                                                                     date_layer_links=date_layer_links)
+                        try:
+                            colormap = opera_mosaic.get_image_colormap(DS[0])
+                        except Exception as e:
+                            colormap = None
+
+                        # Compute the date_threshold using either user-provided 'filter_date' or the date of the data acquistion
+                        # and DIST reference date (12/31/2020)
+                        if filter_date:
+                            date_threshold = compute_date_threshold(filter_date)
+                            layout_date = str(filter_date)
+                        else:
+                            date_threshold = compute_date_threshold(str(date))
+                            layout_date = str(date)
+
+                        # Filter DIST layers by date and confidence
+                        DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
+                    else:
+                        DS = compile_and_load_data(urls, mode)
+                        try:
+                            colormap = opera_mosaic.get_image_colormap(DS[0])
+                        except Exception as e:
+                            colormap = None
+
                 if mode == "flood":
                     conf_column = "Download URL CONF"
                     conf_layer_links = df_sn[conf_column].dropna().tolist() if conf_column in df_sn.columns else []
@@ -666,9 +711,9 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 # Make a PDF layout
                 make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title)
         
-    # Pair-wise differencing for 'fire' and 'flood' modes
-    if mode in ("flood", "fire"):
-        print("[INFO] Computing pairwise differences...")
+    # Pair-wise differencing for 'flood' mode
+    if mode in ("flood"):
+        print("[INFO] Computing pairwise differences between water products...")
         skipped = []  # collect CRS/UTM mismatches
 
         for short_name_k, layers_dict in mosaic_index.items():
@@ -1160,7 +1205,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
             f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
-            f"were reclassified as water using the associated DSWx-HLS Confidence layer."
+            f"were reclassified as water using the associated DSWx-HLS Confidence layer. "
             f"This map depicts regions of full surface water and inundated surface water. "
         )
         data_source = "Copernicus Harmonized Landsat and Sentinel-2"
@@ -1178,7 +1223,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
             subtitle = "OPERA Surface Disturbance Alert from Harmonized Landsat and Sentinel-2 (DIST-ALERT-HLS)"
             map_information = (
             f"The ARIA/OPERA surface disturbance alert map is derived from an OPERA DIST-ALERT-HLS mosaicked "
-            f"product from Harmonized Landsat and Sentinel-2 data."
+            f"product from Harmonized Landsat and Sentinel-2 data. "
             f"This map depicts regions of vegetation disturbance since "+layout_date+"."
             )
             data_source = "Copernicus Harmonized Landsat and Sentinel-2"
