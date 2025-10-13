@@ -647,40 +647,39 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 
                 elif mode == "landslide":
                     if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
-                        continue
-                        # date_column = "Download URL VEG-DIST-DATE"
-                        # conf_column = "Download URL VEG-DIST-CONF"
-                        # date_layer_links = df_sn[date_column].dropna().tolist() if date_column in df_sn.columns else []
-                        # conf_layer_links = df_sn[conf_column].dropna().tolist() if conf_column in df_sn.columns else []
-                        # if not date_layer_links:
-                        #     print(f"[WARN] No VEG-DIST-DATE URLs found for {short_name} on {date}")
-                        #     date_DS = None
-                        # else:
-                        #     print(f"[INFO] Found {len(date_layer_links)} VEG-DIST-DATE URLs")
-                        # if not conf_layer_links:
-                        #     print(f"[WARN] No VEG-DIST-CONF URLs found for {short_name} on {date}")
-                        #     conf_DS = None
-                        # else:
-                        #     print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
-                        # DS, date_DS, conf_DS = compile_and_load_data(urls, mode, 
-                        #                                                 conf_layer_links=conf_layer_links,
-                        #                                                 date_layer_links=date_layer_links)
-                        # try:
-                        #     colormap = opera_mosaic.get_image_colormap(DS[0])
-                        # except Exception as e:
-                        #     colormap = None
+                        date_column = "Download URL VEG-DIST-DATE"
+                        conf_column = "Download URL VEG-DIST-CONF"
+                        date_layer_links = df_sn[date_column].dropna().tolist() if date_column in df_sn.columns else []
+                        conf_layer_links = df_sn[conf_column].dropna().tolist() if conf_column in df_sn.columns else []
+                        if not date_layer_links:
+                            print(f"[WARN] No VEG-DIST-DATE URLs found for {short_name} on {date}")
+                            date_DS = None
+                        else:
+                            print(f"[INFO] Found {len(date_layer_links)} VEG-DIST-DATE URLs")
+                        if not conf_layer_links:
+                            print(f"[WARN] No VEG-DIST-CONF URLs found for {short_name} on {date}")
+                            conf_DS = None
+                        else:
+                            print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
+                        DS, date_DS, conf_DS = compile_and_load_data(urls, mode, 
+                                                                        conf_layer_links=conf_layer_links,
+                                                                        date_layer_links=date_layer_links)
+                        try:
+                            colormap = opera_mosaic.get_image_colormap(DS[0])
+                        except Exception as e:
+                            colormap = None
 
-                        # # Compute the date_threshold using either user-provided 'filter_date' or the date of the data acquistion
-                        # # and DIST reference date (12/31/2020)
-                        # if filter_date:
-                        #     date_threshold = compute_date_threshold(filter_date)
-                        #     layout_date = str(filter_date)
-                        # else:
-                        #     date_threshold = compute_date_threshold(str(date))
-                        #     layout_date = str(date)
+                        # Compute the date_threshold using either user-provided 'filter_date' or the date of the data acquistion
+                        # and DIST reference date (12/31/2020)
+                        if filter_date:
+                            date_threshold = compute_date_threshold(filter_date)
+                            layout_date = str(filter_date)
+                        else:
+                            date_threshold = compute_date_threshold(str(date))
+                            layout_date = str(date)
 
-                        # # Filter DIST layers by date and confidence
-                        # DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
+                        # Filter DIST layers by date and confidence
+                        DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
 
                     elif short_name == "OPERA_L2_RTC-S1_V1":
                         DS = compile_and_load_data(urls, mode)
@@ -1315,11 +1314,22 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
                     break
 
         with fig.inset(
-            position="jBR+o0.5c/1.5c", # Bottom-Right (jBR), offset (o) 0.5cm horizontal, 1.5cm vertical
+            position="jBR+o0.5c/1.5c", 
             box="+p1p,magenta",
             region=zoom_region,
-            projection="M5c", # Use the same size as the main inset
+            projection="M5c",
         ):
+            
+            # Add coastline to inset
+            fig.coast(
+                region=zoom_region,
+                projection="M5c",
+                borders="1/thin",
+                shorelines="thin",
+                land="grey",
+                water="lightblue",
+            )
+
             # Re-plot the data for the inset map
             if short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'WTR':
                 fig.grdimage(
