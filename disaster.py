@@ -93,6 +93,12 @@ def parse_arguments():
         help="Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' mode."
     )
 
+    parser.add_argument(
+        "-rc", "--reclassify_snow_ice", type=str, required=False, default="False",
+        choices=["True", "False"],
+        help="Whether to reclassify false snow/ice positives as water in DSWx-HLS products ONLY ('True'/'False'). Default is 'False'."
+    )
+
     return parser.parse_args()
 
 def authenticate():
@@ -185,32 +191,55 @@ def read_opera_metadata_csv(output_dir):
 def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
     """
     Compile and load data from the provided layer links for mosaicking. Also compile and load
-    data for filtering (depending on whether it is provided).
+    data for filtering (depending on whether it is provided). This modified version
+    **removes** datasets whose CRS is not the most common one.
     Args:
         data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
         conf_layer_links (list, optional): List of URLs for additional layers to filter false positives.
         date_layer_links (list, optional): List of URLs for date layers to filter by date.
     Returns:
-        DS: List of rioxarray datasets loaded from the provided links.
-        conf_DS: List of rioxarray datasets for confidence layers (if applicable).
-        date_DS: List of rioxarray datasets for date layers (if applicable).
+        DS: List of rioxarray datasets loaded from the provided links (filtered by most common CRS).
+        conf_DS: List of rioxarray datasets for confidence layers (if applicable, filtered by most common CRS).
+        date_DS: List of rioxarray datasets for date layers (if applicable, filtered by most common CRS).
     Raises:
         Exception: If there is an error loading any of the datasets.
     """
+    # Imports are moved to the top of the function for consistency, as per the original code's style
     from opera_utils.disp._remote import open_file
     from collections import Counter
     import logging
 
     logging.getLogger().setLevel(logging.ERROR)
 
+    # Assuming authenticate() is defined elsewhere and returns username, password
     username, password = authenticate()
+
+    # New logic to ensure only S1A or S1C are used (not both) for a single date
+    satellite_counts = Counter()
+    for link in data_layer_links:
+        if 'S1A' in link:
+            satellite_counts['S1A'] += 1
+        elif 'S1C' in link:
+            satellite_counts['S1C'] += 1
+
+    if satellite_counts:
+        # Get the satellite type with the highest count
+        most_common_satellite, _ = satellite_counts.most_common(1)[0]
+        print(f"[INFO] Most common satellite type: {most_common_satellite}, keeping only those links.")
+        # Filter the data_layer_links to keep only those with the most common satellite type
+        data_layer_links = [
+            link for link in data_layer_links 
+            if most_common_satellite in link
+        ]
 
     DS = []
     for link in data_layer_links:
         try:
+            # Assuming rioxarray is available
             DS.append(rioxarray.open_rasterio(link, masked=False))
         except Exception as e:
+            # Fallback to authenticated open_file
             f = open_file(
                 link,
                 earthdata_username=username,
@@ -218,11 +247,11 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
             )
             DS.append(rioxarray.open_rasterio(f, masked=False))
 
-    # Sort DS by most common crs for merging
+    # Filter DS to keep only datasets with the most common CRS
     crs_list = [str(ds.rio.crs) for ds in DS]
     crs_counter = Counter(crs_list)
     most_common_crs_str, _ = crs_counter.most_common(1)[0]
-    DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
+    DS = [ds for ds in DS if str(ds.rio.crs) == most_common_crs_str] # This is the step that changed
 
     # If conf_layer_links AND mode == 'flood' compile and load layers to use in filtering
     if conf_layer_links and mode == "flood":
@@ -238,17 +267,18 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
                 )
                 conf_DS.append(rioxarray.open_rasterio(f, masked=False))
 
-        # Sort conf_DS by most common crs for merging
+
         crs_list = [str(ds.rio.crs) for ds in conf_DS]
         crs_counter = Counter(crs_list)
         most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        conf_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
+        conf_DS = [ds for ds in conf_DS if str(ds.rio.crs) == most_common_crs_str]
         return DS, conf_DS
 
     # If conf_layer_links AND date_layer_links AND mode == 'fire' or mode == 'landslide' compile and load layers to use in filtering
     if conf_layer_links and date_layer_links and (mode == "fire" or mode == "landslide"):
         conf_DS = []
         date_DS = []
+        # Load conf_DS
         for link in conf_layer_links:
             try:
                 conf_DS.append(rioxarray.open_rasterio(link, masked=False))
@@ -259,6 +289,7 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
                     earthdata_password=password,
                 )
                 conf_DS.append(rioxarray.open_rasterio(f, masked=False))
+        # Load date_DS
         for link in date_layer_links:
             try:
                 date_DS.append(rioxarray.open_rasterio(link, masked=False))
@@ -270,17 +301,15 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
                 )
                 date_DS.append(rioxarray.open_rasterio(f, masked=False))
 
-        # Sort conf_DS by most common crs for merging
         crs_list = [str(ds.rio.crs) for ds in conf_DS]
         crs_counter = Counter(crs_list)
         most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        conf_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
+        conf_DS = [ds for ds in conf_DS if str(ds.rio.crs) == most_common_crs_str]
 
-        # Sort date_DS by most common crs for merging
         crs_list = [str(ds.rio.crs) for ds in date_DS]
         crs_counter = Counter(crs_list)
         most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        date_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
+        date_DS = [ds for ds in date_DS if str(ds.rio.crs) == most_common_crs_str]
         return DS, date_DS, conf_DS
     else:
         return DS
@@ -467,7 +496,7 @@ def compute_and_write_difference(
     later_path: Path,
     out_path: Path,
     nodata_value: float | int | None = None,
-    log: bool = False, # Added the log argument, defaulting to False
+    log: bool = False,
 ):
     """
     Create a difference raster: (later - earlier) or (log10(later) - log10(earlier)), 
@@ -534,7 +563,7 @@ def compute_and_write_difference(
     except Exception:
         pass
 
-def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, filter_date=None):
+def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, filter_date=None, reclassify_snow_ice=False):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     If the mode is "flood", the DSWx-HLS Confidence layer will be used to reclassify false snow/ice positives as water in DSWx-HLS products ONLY.
@@ -547,6 +576,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
         bbox (list): Bounding box in the form [South, North, West, East].
         zoom_bbox (list): Optional bounding box for the zoom-in inset map in the form [South, North, West, East].
         filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' and 'landslide' mode.
+        reclassify_snow_ice (bool, optional): Whether to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. Default is False.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
@@ -703,14 +733,17 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     except Exception as e:
                         colormap = None
                 
-                    # Reclassify false snow/ice positives in DSWX-HLS only
-                    if (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "BWTR") or (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "WTR"):
-                        if conf_DS is None:
-                            print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
-                            continue
-                        else:
-                            print("[INFO] Reclassifying false snow/ice positives as water based on CONF layers")
-                            DS = reclassify_snow_ice_as_water(DS, conf_DS)
+                    # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
+                    if reclassify_snow_ice == True:
+                        if (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "BWTR") or (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "WTR"):
+                            if conf_DS is None:
+                                print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
+                                continue
+                            else:
+                                print("[INFO] Reclassifying false snow/ice positives as water based on CONF layers")
+                                DS = reclassify_snow_ice_as_water(DS, conf_DS)
+                    else:
+                        print("[INFO] Snow/ice reclassification not requested; proceeding without reclassification.")
 
                 # Mosaic the datasets using the appropriate method/rule
                 mosaic, _, nodata = opera_mosaic.mosaic_opera(DS, product=short_name, merge_args={})
@@ -762,7 +795,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox)
 
                 # Make a PDF layout
-                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title)
+                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice)
         
     # Pair-wise differencing for 'flood' mode
     if mode == "flood":
@@ -811,6 +844,16 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                 log=False
                             )
                             print(f"[INFO] Wrote diff COG: {diff_path}")
+                            
+                            # Make a map with PyGMT
+                            diff_date_str = f"{d_later}_{d_early}"
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
+
+                            # Make a PDF layout
+                            if map_name:
+                                diff_date_str = f"{d_early}, {d_later}"
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title, reclassify_snow_ice)
+                        
                         except Exception as e:
                             skipped.append({
                                 "short_name": short_name_k,
@@ -820,14 +863,6 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                 "error": str(e),
                                 "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
                             })
-
-                        # Make a map with PyGMT
-                        diff_date_str = f"{d_early}, {d_later}"
-                        map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
-
-                        # Make a PDF layout
-                        if map_name:
-                            make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title)
 
         # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
@@ -880,7 +915,17 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                 nodata_value=None,
                                 log=True
                             )
-                            print(f"[INFO] Wrote log-diff COG: {diff_path}")
+                            print(f"[INFO] Wrote diff COG: {diff_path}")
+                            
+                            # Make a map with PyGMT
+                            diff_date_str = f"{d_later}_{d_early}"
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
+
+                            # Make a PDF layout
+                            if map_name:
+                                diff_date_str = f"{d_early}, {d_later}"
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title, reclassify_snow_ice)
+
                         except Exception as e:
                             skipped.append({
                                 "short_name": short_name_k,
@@ -896,9 +941,9 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                         map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
 
                         # Make a PDF layout
-                        if make_map:
+                        if map_name:
                             diff_date_str = f"{d_early}, {d_later}"
-                            make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title)
+                            make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title, reclassify_snow_ice)
 
         # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "log-difference_skipped_pairs.json"
@@ -1054,7 +1099,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
         shorelines="thin",
         land="grey",
         water="lightblue",
-        frame="a",
+        #frame="a",
     )
 
     # Make the map for difference products (if applicable)
@@ -1405,7 +1450,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
 
     return map_name
 
-def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title):
+def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice=False):
     """
     Create a layout using matplotlib for the provided map.
     Args:
@@ -1416,6 +1461,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
         date (str): Date string in the format YYYY-MM-DD.
         layout_date (str): Date threshold in the format YYYY-MM-DD.
         layout_title (str): Title for the layout.
+        reclassify_snow_ice (bool, optional): Flag indicating if snow/ice reclassification was applied. Defaults to False.
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
@@ -1469,12 +1515,19 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
         
     elif short_name == "OPERA_L3_DSWX-HLS_V1":
         subtitle = "OPERA Dynamic Surface Water eXtent from HLS (DSWx-HLS)"
-        map_information = (
-            f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
-            f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
-            f"were reclassified as water using the associated DSWx-HLS Confidence layer. "
-            f"This map depicts regions of full surface water and inundated surface water. "
-        )
+        if reclassify_snow_ice == True:
+            map_information = (
+                f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
+                f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
+                f"were reclassified as water using the associated DSWx-HLS Confidence layer. "
+                f"This map depicts regions of full surface water and inundated surface water. "
+            )
+        else:
+            map_information = (
+                f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked "
+                f"product from Harmonized Landsat and Sentinel-2 data."
+                f"This map depicts regions of full surface water and inundated surface water. "
+            )
         data_source = "Copernicus Harmonized Landsat and Sentinel-2"
         
     elif short_name == "OPERA_L3_DIST-ALERT-S1_V1":
@@ -1653,13 +1706,21 @@ def main():
     # Read the metadata CSV file
     df_opera = read_opera_metadata_csv(dest)
 
+    # df_opera = df_opera[~df_opera['Granule ID'].str.contains('_S1C_')]
+
+    # granule_to_remove = 'OPERA_L3_DSWx-S1_T04VCN_20251010T171911Z_20251011T032947Z_S1A_30_v1.0'
+    # df_opera = df_opera[df_opera['Granule ID'] != granule_to_remove]
+
+    # granule_to_remove = 'OPERA_L3_DSWx-S1_T04VCM_20251010T171911Z_20251011T032947Z_S1A_30_v1.0'
+    # df_opera = df_opera[df_opera['Granule ID'] != granule_to_remove]
+
     # Make a new directory with the mode name
     mode_dir = args.output_dir / args.mode
     make_output_dir(mode_dir)
     print(f"[INFO] Created mode directory: {mode_dir}")
 
     # Generate products based on the mode
-    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.bbox, args.zoom_bbox, args.filter_date)
+    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.bbox, args.zoom_bbox, args.filter_date, args.reclassify_snow_ice)
 
     return
 
