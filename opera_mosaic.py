@@ -32,9 +32,7 @@ def mosaic_opera(DS, product="OPERA_L3_DSWX-S1_V1", merge_args={}):
         priority = {1: 100, 2:95, 3: 90, 0: 50, 250: 20, 251: 15, 252: 10, 253:5, 254:1, 255: 0}
     elif product.startswith("OPERA_L3_DIST"):
         priority = {1: 100, 2:100, 3: 100, 4:100, 5:100, 6:100, 7:100, 8:100, 9:100, 10:100, 0:10, 255: 0}
-    # elif product.startswith("OPERA_L2_RTC"):
-    #     priority = {}
-    else:
+    elif product.startswith("OPERA_L2_RTC"):
         priority = {}
 
     valid_values = set(priority.keys())

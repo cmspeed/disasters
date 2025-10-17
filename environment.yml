@@ -21,4 +21,4 @@ dependencies:
   - tabulate
   - xarray
   - pip:
-      - git+https://github.com/cmspeed/next_pass.git@add-setup
+      - git+https://github.com/cmspeed/next_pass.git@update-rtc
