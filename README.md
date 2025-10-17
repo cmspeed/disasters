@@ -83,7 +83,7 @@ The `-m / --mode` argument determines which disaster type to process and which N
 |--------------|------------------------------------|----------------------------------------|-----------------------------------------------------------------------------|
 | `flood`      | `DSWx-HLS`, `DSWx-S1` | `WTR`, `BWTR` | Detects surface water using optical (HLS) and SAR (S1) observations         |
 | `fire`       | `OPERA_L3_DIST-ALERT-HLS_V1`, `DIST-ALERT-S1` *(coming soon)* | `VEG-ANOM-MAX`, `VEG-DIST-STATUS` | Identifies vegetation disturbance and anomalies from wildfire events        |
-| `landslide`       | `OPERA_L3_DIST-ALERT-HLS_V1`, `OPERA_L2_RTC-S1_V1` | `VEG-ANOM-MAX`, `VEG-DIST-STATUS`, `RTC-VV`, `RTC-VH` |Identifies vegetation disturbance and anomalies from wildfire events        |
+| `landslide`       | `OPERA_L3_DIST-ALERT-HLS_V1`, `OPERA_L2_RTC-S1_V1` | `VEG-ANOM-MAX`, `VEG-DIST-STATUS`, `RTC-VV`, `RTC-VH` |Identifies vegetation disturbance and anomalies from landslides events        |
 | `earthquake` | `CSLC`, `DISP`, `RTC-S1` *(coming soon)* | *(coming soon)* | Maps surface displacement and SAR backscatter changes related to seismic activity | 
 
 ### Output
