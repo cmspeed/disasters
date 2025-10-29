@@ -497,12 +497,19 @@ def compute_and_write_difference(
     out_path: Path,
     nodata_value: float | int | None = None,
     log: bool = False,
-):
+    ):
     """
-    Create a difference raster: (later - earlier) or (log10(later) - log10(earlier)), 
-    aligned to the 'later' grid. The log difference is computed if log=True.
+    Create a difference raster for either 'flood' or 'landslide' mode using DSWx and/or RTC products.
+    The log difference is computed if log=True (in 'landslide' mode).
     If either pixel is nodata in the inputs, output nodata at that pixel.
     Writes a COG to out_path via the save_gtiff_as_cog helper.
+    
+    Differencing for 'flood' mode (DSWx products, log=False) implements a categorical categorical
+    transition map where each unique pair of (Earlier, Later) classes in {0, 1, 2, 3} (i.e. no water/water classes)
+    gets a unique integer code (Code = L * 4 + E). Pixels at locations with values outside of this list (e.g, cloud, snow/ice) 
+    in either Earlier or Later raster, are set to nodata in the output difference raster.
+    
+    The transition codes and descriptions are stored in the GeoTIFF metadata.
     """
     import xarray as xr
     import rioxarray
@@ -521,8 +528,62 @@ def compute_and_write_difference(
     # Difference calculation (based on 'log' argument)
     if log:
         diff = 10 * np.log10(da_later / da_early)
+        diff = diff.astype('float32')
+        print("[INFO] Computed log difference for RTC-S1.")
+        # Clear existing metadata and set a description
+        diff.attrs.clear()
+        diff.attrs['DESCRIPTION'] = 'Log Ratio Difference (Later / Earlier) for RTC-S1'
+        metadata_to_save = {}
     else:
-        diff = da_later - da_early
+        print("[INFO] Computed categorical transition codes for DSWx.")
+        VALID_CLASSES = [0, 1, 2, 3]
+        MAX_CLASS_VALUE = 4
+
+        # Define the transition codes and their descriptions (L * 4 + E)
+        TRANSITION_DESCRIPTIONS = {
+            # E (Earlier) -> L (Later)
+            # WATER CHANGE (LOSS/RECESSION) (Later < Earlier)
+            1: "Loss: Open Water (1) -> Not Water (0)",
+            2: "Loss: Partial Water (2) -> Not Water (0)",
+            3: "Loss: Inundated Veg (3) -> Not Water (0)",
+            9: "Loss/Change: Partial Water (2) -> Open Water (1)",
+            13: "Loss/Change: Inundated Veg (3) -> Open Water (1)",
+            14: "Loss/Change: Inundated Veg (3) -> Partial Water (2)",
+            
+            # WATER CHANGE (GAIN/INUNDATION) (Later > Earlier)
+            4: "Inundation: Not Water (0) -> Open Water (1)",
+            8: "Inundation: Not Water (0) -> Partial Water (2)",
+            12: "Inundation: Not Water (0) -> Inundated Veg (3)",
+            6: "Change/Gain: Open Water (1) -> Partial Water (2)",
+            7: "Change/Gain: Open Water (1) -> Inundated Veg (3)",
+            11: "Change/Gain: Partial Water (2) -> Inundated Veg (3)",
+
+            # NO CHANGE (Later = Earlier)
+            0: "No Change: Not Water (0) -> Not Water (0)",
+            5: "No Change: Open Water (1) -> Open Water (1)",
+            10: "No Change: Partial Water (2) -> Partial Water (2)",
+            15: "No Change: Inundated Veg (3) -> Inundated Veg (3)",
+        }
+
+        # Compute the transition code: Code = L * MAX_CLASS_VALUE + E
+        L = da_later.fillna(0).astype(int)
+        E = da_early.fillna(0).astype(int)
+        transition_code = L * MAX_CLASS_VALUE + E
+
+        # Create and apply a mask for invalid classes (25x values)
+        invalid_class_mask = ~(np.isin(L, VALID_CLASSES) & np.isin(E, VALID_CLASSES))
+        diff = xr.where(invalid_class_mask, np.nan, transition_code).astype(np.float32)
+
+        # Prepare metadata for saving
+        diff.attrs.clear()
+        diff.attrs['DESCRIPTION'] = 'Categorical Transition Map (DSWx-HLS/S1 Water Products)'
+
+        # Convert the Python dict to GDAL metadata keys (KEY=VALUE) for GIS software
+        metadata_to_save = {
+            f'TRANSITION_CODE_{code}': desc 
+            for code, desc in TRANSITION_DESCRIPTIONS.items()
+        }
+        metadata_to_save['CODING_SCHEME'] = 'Transition Code (C) = L * 4 + E, where E, L are classes (0-3) in Earlier and Later rasters.'
 
     # Compute a mask for any location that was nodata in either input
     input_nodata_mask = xr.where(
@@ -550,18 +611,20 @@ def compute_and_write_difference(
         diff.rio.write_nodata(nd, encoded=True, inplace=True)
         diff.rio.write_crs(da_later.rio.crs, inplace=True)
 
-    # Write the resulting difference array to a temporary GeoTIFF
-    tmp_gtiff = out_path.with_suffix(".tmp.tif")
-    diff.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True)
+        # Write the resulting difference array to a temporary GeoTIFF
+        tmp_gtiff = out_path.with_suffix(".tmp.tif")
 
-    # Convert the temporary GeoTIFF to a Cloud Optimized GeoTIFF (COG)
-    save_gtiff_as_cog(tmp_gtiff, out_path)
+        # Save with metadata
+        diff.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True, dtype="float32", **{'GDAL_METADATA': metadata_to_save})
 
-    # Clean up the temporary file
-    try:
-        tmp_gtiff.unlink(missing_ok=True)
-    except Exception:
-        pass
+        # Convert the temporary GeoTIFF to a Cloud Optimized GeoTIFF (COG)
+        save_gtiff_as_cog(tmp_gtiff, out_path)
+
+        # Clean up the temporary file
+        try:
+            tmp_gtiff.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, filter_date=None, reclassify_snow_ice=False):
     """
