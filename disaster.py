@@ -659,7 +659,6 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
     make_output_dir(layouts_dir)
     
     if mode == "flood":
-        #short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
         short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
         layer_names = ["WTR", "BWTR"]
     elif mode == "fire":
@@ -856,10 +855,10 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                 }
 
                 # Make a map with PyGMT
-                # map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox)
+                map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox)
 
-                # # Make a PDF layout
-                # make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice)
+                # Make a PDF layout
+                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice)
         
     # Pair-wise differencing for 'flood' mode
     if mode == "flood":
@@ -909,32 +908,30 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                             )
                             print(f"[INFO] Wrote diff COG: {diff_path}")
                             
-                        #     # Make a map with PyGMT
-                        #     diff_date_str = f"{d_later}_{d_early}"
-                        #     map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
+                            # Make a map with PyGMT
+                            diff_date_str = f"{d_later}_{d_early}"
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
 
-                        #     # Make a PDF layout
-                        #     if map_name:
-                        #         diff_date_str = f"{d_early}, {d_later}"
-                        #         make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title, reclassify_snow_ice)
+                            # Make a PDF layout
+                            if map_name:
+                                diff_date_str = f"{d_early}, {d_later}"
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title, reclassify_snow_ice)
                         
-                        except:
-                            continue
-                        # except Exception as e:
-                        #     skipped.append({
-                        #         "short_name": short_name_k,
-                        #         "layer": layer_k,
-                        #         "date_earlier": d_early,
-                        #         "date_later": d_later,
-                        #         "error": str(e),
-                        #         "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
-                        #     })
+                        except Exception as e:
+                            skipped.append({
+                                "short_name": short_name_k,
+                                "layer": layer_k,
+                                "date_earlier": d_early,
+                                "date_later": d_later,
+                                "error": str(e),
+                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
+                            })
 
         # Report skipped pairs due to CRS/UTM differences or errors
-        # report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
-        # with open(report_path, "w") as f:
-        #     json.dump(skipped, f, indent=2)
-        # print(f"[INFO] Difference skip report: {report_path} ({len(skipped)} skipped)")
+        report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
+        with open(report_path, "w") as f:
+            json.dump(skipped, f, indent=2)
+        print(f"[INFO] Difference skip report: {report_path} ({len(skipped)} skipped)")
 
     if mode == "landslide":
         print("[INFO] Computing pairwise log difference between RTC backscatter products...")
