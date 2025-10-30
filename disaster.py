@@ -11,6 +11,7 @@ import rasterio
 import rioxarray
 import xarray as xr
 from collections import defaultdict
+import shutil
 
 def parse_arguments():
     """
@@ -190,32 +191,32 @@ def read_opera_metadata_csv(output_dir):
 
 def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
     """
-    Compile and load data from the provided layer links for mosaicking. Also compile and load
-    data for filtering (depending on whether it is provided). This modified version
-    **removes** datasets whose CRS is not the most common one.
+    Compile and load data from the provided layer links for mosaicking. This modified version
+    loads all datasets regardless of their CRS, but filters to the most common Sentinel-1
+    unit (S1A or S1C) if applicable.
+    
     Args:
         data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
         conf_layer_links (list, optional): List of URLs for additional layers to filter false positives.
         date_layer_links (list, optional): List of URLs for date layers to filter by date.
     Returns:
-        DS: List of rioxarray datasets loaded from the provided links (filtered by most common CRS).
-        conf_DS: List of rioxarray datasets for confidence layers (if applicable, filtered by most common CRS).
-        date_DS: List of rioxarray datasets for date layers (if applicable, filtered by most common CRS).
+        DS: List of rioxarray datasets loaded from the provided links (in granule order).
+        conf_DS: List of rioxarray datasets for confidence layers (if applicable, in granule order).
+        date_DS: List of rioxarray datasets for date layers (if applicable, in granule order).
     Raises:
         Exception: If there is an error loading any of the datasets.
     """
-    # Imports are moved to the top of the function for consistency, as per the original code's style
     from opera_utils.disp._remote import open_file
     from collections import Counter
     import logging
 
     logging.getLogger().setLevel(logging.ERROR)
 
-    # Assuming authenticate() is defined elsewhere and returns username, password
+    # Authenticate to get username and password
     username, password = authenticate()
 
-    # New logic to ensure only S1A or S1C are used (not both) for a single date
+    # Ensure only S1A or S1C are used (not both) for a single date
     satellite_counts = Counter()
     for link in data_layer_links:
         if 'S1A' in link:
@@ -227,93 +228,55 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
         # Get the satellite type with the highest count
         most_common_satellite, _ = satellite_counts.most_common(1)[0]
         print(f"[INFO] Most common satellite type: {most_common_satellite}, keeping only those links.")
-        # Filter the data_layer_links to keep only those with the most common satellite type
+        
+        # Create a boolean mask to filter all lists consistently
+        is_most_common = [most_common_satellite in link for link in data_layer_links]
+        
         data_layer_links = [
-            link for link in data_layer_links 
-            if most_common_satellite in link
+            link for i, link in enumerate(data_layer_links) if is_most_common[i]
         ]
+        
+        # Filter auxiliary links consistently if they exist
+        if conf_layer_links:
+            conf_layer_links = [
+                link for i, link in enumerate(conf_layer_links) if is_most_common[i]
+            ]
+        if date_layer_links:
+            date_layer_links = [
+                link for i, link in enumerate(date_layer_links) if is_most_common[i]
+            ]
 
-    DS = []
-    for link in data_layer_links:
-        try:
-            # Assuming rioxarray is available
-            DS.append(rioxarray.open_rasterio(link, masked=False))
-        except Exception as e:
-            # Fallback to authenticated open_file
-            f = open_file(
-                link,
-                earthdata_username=username,
-                earthdata_password=password,
-            )
-            DS.append(rioxarray.open_rasterio(f, masked=False))
-
-    # Filter DS to keep only datasets with the most common CRS
-    crs_list = [str(ds.rio.crs) for ds in DS]
-    crs_counter = Counter(crs_list)
-    most_common_crs_str, _ = crs_counter.most_common(1)[0]
-    DS = [ds for ds in DS if str(ds.rio.crs) == most_common_crs_str] # This is the step that changed
-
-    # If conf_layer_links AND mode == 'flood' compile and load layers to use in filtering
-    if conf_layer_links and mode == "flood":
-        conf_DS = []
-        for link in conf_layer_links:
+    # Helper to load datasets
+    def load_datasets(links):
+        datasets = []
+        for link in links:
             try:
-                conf_DS.append(rioxarray.open_rasterio(link, masked=False))
+                datasets.append(rioxarray.open_rasterio(link, masked=False))
             except Exception as e:
                 f = open_file(
                     link,
                     earthdata_username=username,
                     earthdata_password=password,
                 )
-                conf_DS.append(rioxarray.open_rasterio(f, masked=False))
+                datasets.append(rioxarray.open_rasterio(f, masked=False))
+        return datasets
 
+    # Load the primary data layer (DS)
+    DS = load_datasets(data_layer_links)
 
-        crs_list = [str(ds.rio.crs) for ds in conf_DS]
-        crs_counter = Counter(crs_list)
-        most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        conf_DS = [ds for ds in conf_DS if str(ds.rio.crs) == most_common_crs_str]
+    # If conf_layer_links AND mode == 'flood' compile and load layers to use in filtering
+    if conf_layer_links and mode == "flood":
+        conf_DS = load_datasets(conf_layer_links)
         return DS, conf_DS
 
     # If conf_layer_links AND date_layer_links AND mode == 'fire' or mode == 'landslide' compile and load layers to use in filtering
     if conf_layer_links and date_layer_links and (mode == "fire" or mode == "landslide"):
-        conf_DS = []
-        date_DS = []
-        # Load conf_DS
-        for link in conf_layer_links:
-            try:
-                conf_DS.append(rioxarray.open_rasterio(link, masked=False))
-            except Exception as e:
-                f = open_file(
-                    link,
-                    earthdata_username=username,
-                    earthdata_password=password,
-                )
-                conf_DS.append(rioxarray.open_rasterio(f, masked=False))
-        # Load date_DS
-        for link in date_layer_links:
-            try:
-                date_DS.append(rioxarray.open_rasterio(link, masked=False))
-            except Exception as e:
-                f = open_file(
-                    link,
-                    earthdata_username=username,
-                    earthdata_password=password,
-                )
-                date_DS.append(rioxarray.open_rasterio(f, masked=False))
-
-        crs_list = [str(ds.rio.crs) for ds in conf_DS]
-        crs_counter = Counter(crs_list)
-        most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        conf_DS = [ds for ds in conf_DS if str(ds.rio.crs) == most_common_crs_str]
-
-        crs_list = [str(ds.rio.crs) for ds in date_DS]
-        crs_counter = Counter(crs_list)
-        most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        date_DS = [ds for ds in date_DS if str(ds.rio.crs) == most_common_crs_str]
+        conf_DS = load_datasets(conf_layer_links)
+        date_DS = load_datasets(date_layer_links)
         return DS, date_DS, conf_DS
     else:
         return DS
-
+    
 def reclassify_snow_ice_as_water(DS, conf_DS):
     """
     Reclassify false snow/ice positives (value 252) as water (value 1) based on the confidence layers. Only applicable for DSWx-HLS.
@@ -629,8 +592,9 @@ def compute_and_write_difference(
 def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, filter_date=None, reclassify_snow_ice=False):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
-    If the mode is "flood", the DSWx-HLS Confidence layer will be used to reclassify false snow/ice positives as water in DSWx-HLS products ONLY.
-    This approach is specific to flood mode and will not be applied for other modes (i.e, fire, landslide, or earthquake).
+    The logic is updated to generate a separate mosaic for each unique UTM zone present 
+    in the intersecting granules for a given date, ensuring high-fidelity data processing.
+    
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
@@ -645,6 +609,8 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
     """
     import opera_mosaic
     from rasterio.shutil import copy
+    from collections import defaultdict
+    import re
 
     # Create data directory
     data_dir = mode_dir / "data"
@@ -677,7 +643,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
     unique_dates.sort()
 
     # Create an index of mosaics created for use in pair-wise differencing
-    mosaic_index = defaultdict(lambda: defaultdict(dict))
+    mosaic_index = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
 
     for date in unique_dates:
         df_on_date = df_opera[df_opera['Start Date'] == date]
@@ -686,23 +652,23 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
             df_sn = df_on_date[df_on_date['Dataset'] == short_name]
 
             if df_sn.empty:
-                continue  # No matching products for this short_name on this date
+                continue
 
             for layer in layer_names:
                 url_column = f"Download URL {layer}"
                 if url_column not in df_sn.columns:
-                    continue  # Skip if this layer column is not present
+                    continue
 
                 urls = df_sn[url_column].dropna().tolist()
                 if not urls:
-                    continue  # Skip if no valid URLs for this layer on this date
+                    continue
 
                 print(f"[INFO] Processing {short_name} - {layer} on {date}")
                 print(f"Found {len(urls)} URLs")
 
                 layout_date = ''
+                DS, conf_DS, date_DS = None, None, None
 
-                # Compile and load data
                 if mode == "fire":
                     date_column = "Download URL VEG-DIST-DATE"
                     conf_column = "Download URL VEG-DIST-CONF"
@@ -710,33 +676,21 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     conf_layer_links = df_sn[conf_column].dropna().tolist() if conf_column in df_sn.columns else []
                     if not date_layer_links:
                         print(f"[WARN] No VEG-DIST-DATE URLs found for {short_name} on {date}")
-                        date_DS = None
                     else:
                         print(f"[INFO] Found {len(date_layer_links)} VEG-DIST-DATE URLs")
                     if not conf_layer_links:
                         print(f"[WARN] No VEG-DIST-CONF URLs found for {short_name} on {date}")
-                        conf_DS = None
                     else:
                         print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
                     DS, date_DS, conf_DS = compile_and_load_data(urls, mode,
                                                                  conf_layer_links=conf_layer_links,
                                                                  date_layer_links=date_layer_links)
-                    try:
-                        colormap = opera_mosaic.get_image_colormap(DS[0])
-                    except Exception as e:
-                        colormap = None
-
-                    # Compute the date_threshold using either user-provided 'filter_date' or the date of the data acquistion
-                    # and DIST reference date (12/31/2020)
                     if filter_date:
                         date_threshold = compute_date_threshold(filter_date)
                         layout_date = str(filter_date)
                     else:
                         date_threshold = compute_date_threshold(str(date))
                         layout_date = str(date)
-
-                    # Filter DIST layers by date and confidence
-                    DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
                 
                 elif mode == "landslide":
                     if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
@@ -746,24 +700,16 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                         conf_layer_links = df_sn[conf_column].dropna().tolist() if conf_column in df_sn.columns else []
                         if not date_layer_links:
                             print(f"[WARN] No VEG-DIST-DATE URLs found for {short_name} on {date}")
-                            date_DS = None
                         else:
                             print(f"[INFO] Found {len(date_layer_links)} VEG-DIST-DATE URLs")
                         if not conf_layer_links:
                             print(f"[WARN] No VEG-DIST-CONF URLs found for {short_name} on {date}")
-                            conf_DS = None
                         else:
                             print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
                         DS, date_DS, conf_DS = compile_and_load_data(urls, mode, 
                                                                         conf_layer_links=conf_layer_links,
                                                                         date_layer_links=date_layer_links)
-                        try:
-                            colormap = opera_mosaic.get_image_colormap(DS[0])
-                        except Exception as e:
-                            colormap = None
-
-                        # Compute the date_threshold using either user-provided 'filter_date' or the date of the data acquistion
-                        # and DIST reference date (12/31/2020)
+                        
                         if filter_date:
                             date_threshold = compute_date_threshold(filter_date)
                             layout_date = str(filter_date)
@@ -771,15 +717,8 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                             date_threshold = compute_date_threshold(str(date))
                             layout_date = str(date)
 
-                        # Filter DIST layers by date and confidence
-                        DS = filter_by_date_and_confidence(DS, date_DS, date_threshold, DS_conf=conf_DS, confidence_threshold=100, fill_value=None)
-
                     elif short_name == "OPERA_L2_RTC-S1_V1":
                         DS = compile_and_load_data(urls, mode)
-                        try:
-                            colormap = opera_mosaic.get_image_colormap(DS[0])
-                        except Exception as e:
-                            colormap = None
 
                 elif mode == "flood":
                     conf_column = "Download URL CONF"
@@ -791,141 +730,245 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                         print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
 
                     DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
-                    try:
-                        colormap = opera_mosaic.get_image_colormap(DS[0])
-                    except Exception as e:
-                        colormap = None
+
+
+                # Group loaded DataArrays by CRS (UTM Zone)
+                crs_groups = defaultdict(list)
+                conf_groups = defaultdict(list)
+                date_groups = defaultdict(list)
+
+                # Ensure all lists are non-empty before zipping
+                if not DS:
+                    print(f"[WARN] No datasets loaded for {short_name} - {layer} on {date}. Skipping.")
+                    continue
                 
-                    # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
-                    if reclassify_snow_ice == True:
-                        if (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "BWTR") or (short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "WTR"):
-                            if conf_DS is None:
-                                print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
-                                continue
-                            else:
-                                print("[INFO] Reclassifying false snow/ice positives as water based on CONF layers")
-                                DS = reclassify_snow_ice_as_water(DS, conf_DS)
+                # Determine auxiliary list lengths for zipping
+                aux_lists = []
+                if conf_DS is not None and mode == "flood":
+                    aux_lists.append(conf_DS)
+                elif conf_DS is not None and mode in ["fire", "landslide"]:
+                    aux_lists.extend([date_DS, conf_DS])
+                
+                if aux_lists:
+                    # Zip DS with auxiliary layers (conf_DS, date_DS)
+                    for i, (da_data, *aux_data) in enumerate(zip(DS, *aux_lists)):
+                        try:
+                            crs_str = str(da_data.rio.crs)
+                        except AttributeError:
+                            print(f"[WARN] Granule {i} missing CRS metadata. Skipping.")
+                            continue
+                        
+                        crs_groups[crs_str].append(da_data)
+                        if mode == "flood":
+                            conf_groups[crs_str].append(aux_data[0])
+                        elif mode in ["fire", "landslide"] and short_name.startswith('OPERA_L3_DIST'):
+                            date_groups[crs_str].append(aux_data[0])
+                            conf_groups[crs_str].append(aux_data[1])
+                else:
+                    # Only DS is present (e.g., RTC-S1)
+                    for i, da_data in enumerate(DS):
+                        try:
+                            crs_str = str(da_data.rio.crs)
+                        except AttributeError:
+                            print(f"[WARN] Granule {i} missing CRS metadata. Skipping.")
+                            continue
+                        crs_groups[crs_str].append(da_data)
+
+
+                # Iterate through each CRS group to process and mosaic
+                for crs_str, ds_group in crs_groups.items():
+                    
+                    # Generate a descriptive UTM suffix (e.g., _18N, _17S)
+                    utm_suffix = ""
+                    
+                    # Try to extract the UTM Zone number and Hemisphere (N/S) from the CRS string
+                    utm_match = re.search(r'UTM Zone (\d{1,2})([NS])', crs_str)
+                    
+                    if utm_match:
+                        zone_number = utm_match.group(1)
+                        hemisphere = utm_match.group(2)
+                        utm_suffix = f"_{zone_number}{hemisphere}"
+                        print(f"[INFO] Detected UTM Zone: {utm_suffix}")
                     else:
-                        print("[INFO] Snow/ice reclassification not requested; proceeding without reclassification.")
+                        # Fallback to EPSG if UTM info isn't explicitly in the WKT string (e.g., just "EPSG:32618")
+                        crs_match = re.search(r'EPSG:(\d+)', crs_str)
+                        if crs_match:
+                            epsg_code = int(crs_match.group(1))
+                            
+                            # Standard UTM EPSG codes are 326xx (North) or 327xx (South)
+                            if 32600 <= epsg_code <= 32660:
+                                zone_number = epsg_code - 32600
+                                utm_suffix = f"_{zone_number}N"
+                                print(f"[INFO] Deduced UTM Zone from N-EPSG: {utm_suffix}")
+                            elif 32700 <= epsg_code <= 32760:
+                                zone_number = epsg_code - 32700
+                                utm_suffix = f"_{zone_number}S"
+                                print(f"[INFO] Deduced UTM Zone from S-EPSG: {utm_suffix}")
+                            else:
+                                # Fallback for non-standard or unknown EPSG
+                                utm_suffix = f"_EPSG{epsg_code}"
+                                print(f"[WARN] Non-UTM EPSG code {epsg_code}. Using suffix: {utm_suffix}")
+                        else:
+                            # Last resort: use a hash of the full CRS string
+                            print(f"[WARN] Could not parse UTM or EPSG from CRS string: {crs_str}. Using raw hash.")
+                            utm_suffix = f"_Hash{hash(crs_str) % 10000}"
 
-                # Mosaic the datasets using the appropriate method/rule
-                mosaic, _, nodata = opera_mosaic.mosaic_opera(DS, product=short_name, merge_args={})
-                image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata)
+                    current_conf_DS = conf_groups.get(crs_str)
+                    current_date_DS = date_groups.get(crs_str)
+                    
+                    # Filtering/Reclassification (Per CRS Group)
+                    if mode == "fire" or (mode == "landslide" and short_name.startswith('OPERA_L3_DIST')):
+                        # Filter DIST layers by date and confidence
+                        ds_group = filter_by_date_and_confidence(ds_group, current_date_DS, date_threshold, DS_conf=current_conf_DS, confidence_threshold=100, fill_value=None)
+                    
+                    elif mode == "flood":
+                        # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
+                        if reclassify_snow_ice == True:
+                            if (short_name == "OPERA_L3_DSWX-HLS_V1" and layer in ["BWTR", "WTR"]):
+                                if current_conf_DS is None:
+                                    print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
+                                else:
+                                    print(f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers for CRS {utm_suffix}")
+                                    ds_group = reclassify_snow_ice_as_water(ds_group, current_conf_DS)
+                        else:
+                            print("[INFO] Snow/ice reclassification not requested; proceeding without reclassification.")
+                    
+                    # Mosaic the current CRS group
+                    try:
+                        colormap = opera_mosaic.get_image_colormap(ds_group[0])
+                    except Exception:
+                        colormap = None
+                        
+                    # Mosaic the datasets using the appropriate method/rule
+                    mosaic, _, nodata = opera_mosaic.mosaic_opera(ds_group, product=short_name, merge_args={})
+                    image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata)
 
-                # Create filename and full paths
-                mosaic_name = f"{short_name}_{layer}_{date}_mosaic.tif"
-                mosaic_path = data_dir / mosaic_name
-                tmp_path = data_dir / f"tmp_{mosaic_name}"
+                    # Create filename and full paths
+                    mosaic_name = f"{short_name}_{layer}_{date}{utm_suffix}_mosaic.tif" # ADDED UTM SUFFIX
+                    mosaic_path = data_dir / mosaic_name
+                    tmp_path = data_dir / f"tmp_{mosaic_name}"
 
-                # Save the mosaic to a temporary GeoTIFF
-                copy(image, tmp_path, driver="GTiff")
+                    # Save the mosaic to a temporary GeoTIFF
+                    copy(image, tmp_path, driver="GTiff")
 
-                warp_args = {
-                    "xRes": 30,
-                    "yRes": 30,
-                    "creationOptions": ["COMPRESS=DEFLATE"],
-                }
+                    warp_args = {
+                        "xRes": 30,
+                        "yRes": 30,
+                        "creationOptions": ["COMPRESS=DEFLATE"],
+                    }
 
-                if short_name.startswith('OPERA_L2_RTC'):
-                    warp_args['outputType'] = gdal.GDT_Float32
+                    if short_name.startswith('OPERA_L2_RTC'):
+                        warp_args['outputType'] = gdal.GDT_Float32
 
-                # Reproject/compress using GDAL directly into the final GeoTIFF
-                gdal.Warp(
-                    mosaic_path,
-                    tmp_path,
-                    **warp_args
-                )
+                    # Reproject/compress using GDAL directly into the final GeoTIFF
+                    gdal.Warp(
+                        mosaic_path,
+                        tmp_path,
+                        **warp_args
+                    )
 
-                # Convert to COG (writes back into mosaic_path)
-                save_gtiff_as_cog(mosaic_path, mosaic_path)
+                    # Convert to COG (writes back into mosaic_path)
+                    save_gtiff_as_cog(mosaic_path, mosaic_path)
 
-                print(f"[INFO] Mosaic written as COG: {mosaic_path}")
+                    print(f"[INFO] Mosaic written as COG: {mosaic_path}")
 
-                # Clean up tmp file
-                if tmp_path.exists():
-                    tmp_path.unlink()
+                    # Clean up tmp file
+                    if tmp_path.exists():
+                        tmp_path.unlink()
 
-                # Add info to the mosiac index for pair-wise differencing
-                with rasterio.open(mosaic_path) as ds:
-                    mosaic_crs = ds.crs
+                    # Add info to the mosiac index for pair-wise differencing
+                    with rasterio.open(mosaic_path) as ds:
+                        mosaic_crs = ds.crs
 
-                mosaic_index[short_name][layer][str(date)] = {
-                    "path": mosaic_path,
-                    "crs": mosaic_crs
-                }
+                    # UPDATED STRUCTURE: [short_name][layer][date] = {utm_suffix: info_dict}
+                    mosaic_index[short_name][layer][str(date)][utm_suffix] = {
+                        "path": mosaic_path,
+                        "crs": mosaic_crs
+                    }
+                    # Make a map with PyGMT
+                    map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox, utm_suffix=utm_suffix)
 
-                # Make a map with PyGMT
-                map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox)
+                    # Make a PDF layout
+                    make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice, utm_suffix=utm_suffix)
 
-                # Make a PDF layout
-                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice)
-        
+
     # Pair-wise differencing for 'flood' mode
     if mode == "flood":
         print("[INFO] Computing pairwise differences between water products...")
-        skipped = []  # collect CRS/UTM mismatches
+        skipped = []
 
         for short_name_k, layers_dict in mosaic_index.items():
             for layer_k, date_map in layers_dict.items():
-                # all unique dates for which mosaics exist for this (short_name, layer)
-                dates = sorted(date_map.keys())  
+                
+                # Restructure by UTM zone for differencing
+                utm_date_map = defaultdict(lambda: defaultdict(dict))
+                for d, utm_dict in date_map.items():
+                    for utm, info in utm_dict.items():
+                        utm_date_map[utm][d] = info
 
-                # Generate difference for all possible pairs
-                for i in range(len(dates)):
-                    for j in range(i + 1, len(dates)):
-                        d_early = dates[i]
-                        d_later = dates[j]
+                for utm_suffix_k, utm_map in utm_date_map.items():
+                    dates = sorted(utm_map.keys()) 
 
-                        early_info = date_map[d_early]
-                        later_info = date_map[d_later]
+                    # Generate difference for all possible pairs within this UTM zone
+                    for i in range(len(dates)):
+                        for j in range(i + 1, len(dates)):
+                            d_early = dates[i]
+                            d_later = dates[j]
 
-                        # UTM/CRS check (skip the pair if different or unknown UTM zones)
-                        crs_a = early_info["crs"]
-                        crs_b = later_info["crs"]
-                        if not same_utm_zone(crs_a, crs_b):
-                            skipped.append({
-                                "short_name": short_name_k,
-                                "layer": layer_k,
-                                "date_earlier": d_early,
-                                "date_later": d_later,
-                                "crs_earlier": crs_a.to_string() if crs_a else None,
-                                "crs_later": crs_b.to_string() if crs_b else None,
-                                "reason": "different or unknown UTM zone"
-                            })
-                            continue
-
-                        # Name and path: {short}_{layer}_{LATER}_minus_{EARLIER}_diff.tif
-                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_diff.tif"
-                        diff_path = (mode_dir / "data") / diff_name
-
-                        try:
-                            compute_and_write_difference(
-                                earlier_path=early_info["path"],
-                                later_path=later_info["path"],
-                                out_path=diff_path,
-                                nodata_value=None,
-                                log=False
-                            )
-                            print(f"[INFO] Wrote diff COG: {diff_path}")
+                            early_info = utm_map[d_early]
+                            later_info = utm_map[d_later]
                             
-                            # Make a map with PyGMT
-                            diff_date_str = f"{d_later}_{d_early}"
-                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
+                            crs_a = early_info["crs"]
+                            crs_b = later_info["crs"]
+                            
+                            # The check will always pass if utm_map was created correctly.
+                            if not same_utm_zone(crs_a, crs_b):
+                                # This block should rarely be hit if the grouping is correct
+                                skipped.append({
+                                    "short_name": short_name_k,
+                                    "layer": layer_k,
+                                    "date_earlier": d_early,
+                                    "date_later": d_later,
+                                    "utm_suffix": utm_suffix_k,
+                                    "crs_earlier": crs_a.to_string() if crs_a else None,
+                                    "crs_later": crs_b.to_string() if crs_b else None,
+                                    "reason": "internal CRS mismatch after grouping (error)"
+                                })
+                                continue
 
-                            # Make a PDF layout
-                            if map_name:
-                                diff_date_str = f"{d_early}, {d_later}"
-                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title, reclassify_snow_ice)
-                        
-                        except Exception as e:
-                            skipped.append({
-                                "short_name": short_name_k,
-                                "layer": layer_k,
-                                "date_earlier": d_early,
-                                "date_later": d_later,
-                                "error": str(e),
-                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
-                            })
+                            # Name and path: {short}_{layer}_{LATER}_{EARLIER}{UTM}_diff.tif
+                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}{utm_suffix_k}_diff.tif"
+                            diff_path = (mode_dir / "data") / diff_name
+
+                            try:
+                                compute_and_write_difference(
+                                    earlier_path=early_info["path"],
+                                    later_path=later_info["path"],
+                                    out_path=diff_path,
+                                    nodata_value=None,
+                                    log=False
+                                )
+                                print(f"[INFO] Wrote diff COG: {diff_path}")
+                                
+                                # Make a map with PyGMT
+                                diff_date_str = f"{d_later}_{d_early}"
+                                map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True, utm_suffix=utm_suffix_k) # ADDED utm_suffix
+
+                                # Make a PDF layout
+                                if map_name:
+                                    diff_date_str_layout = f"{d_early}, {d_later}"
+                                    make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice, utm_suffix=utm_suffix_k) # ADDED utm_suffix
+                            
+                            except Exception as e:
+                                skipped.append({
+                                    "short_name": short_name_k,
+                                    "layer": layer_k,
+                                    "date_earlier": d_early,
+                                    "date_later": d_later,
+                                    "utm_suffix": utm_suffix_k, # ADDED
+                                    "error": str(e),
+                                    "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
+                                })
 
         # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
@@ -933,80 +976,84 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
             json.dump(skipped, f, indent=2)
         print(f"[INFO] Difference skip report: {report_path} ({len(skipped)} skipped)")
 
+    # Pair-wise differencing for 'landslide' mode (RTC-S1 log difference)
     if mode == "landslide":
         print("[INFO] Computing pairwise log difference between RTC backscatter products...")
-        skipped = []  # collect CRS/UTM mismatches
+        skipped = []
 
         for short_name_k, layers_dict in mosaic_index.items():
             for layer_k, date_map in layers_dict.items():
-                # all unique dates for which mosaics exist for this (short_name, layer)
-                dates = sorted(date_map.keys())  
+                
+                utm_date_map = defaultdict(lambda: defaultdict(dict))
+                for d, utm_dict in date_map.items():
+                    for utm, info in utm_dict.items():
+                        utm_date_map[utm][d] = info
 
-                # Generate difference for all possible pairs
-                for i in range(len(dates)):
-                    for j in range(i + 1, len(dates)):
-                        d_early = dates[i]
-                        d_later = dates[j]
+                for utm_suffix_k, utm_map in utm_date_map.items():
+                    # Only compute log-diff for RTC products
+                    if short_name_k != "OPERA_L2_RTC-S1_V1":
+                        continue
+                        
+                    dates = sorted(utm_map.keys())
 
-                        early_info = date_map[d_early]
-                        later_info = date_map[d_later]
+                    # Generate difference for all possible pairs within this UTM zone
+                    for i in range(len(dates)):
+                        for j in range(i + 1, len(dates)):
+                            d_early = dates[i]
+                            d_later = dates[j]
 
-                        # UTM/CRS check (skip the pair if different or unknown UTM zones)
-                        crs_a = early_info["crs"]
-                        crs_b = later_info["crs"]
-                        if not same_utm_zone(crs_a, crs_b):
-                            skipped.append({
-                                "short_name": short_name_k,
-                                "layer": layer_k,
-                                "date_earlier": d_early,
-                                "date_later": d_later,
-                                "crs_earlier": crs_a.to_string() if crs_a else None,
-                                "crs_later": crs_b.to_string() if crs_b else None,
-                                "reason": "different or unknown UTM zone"
-                            })
-                            continue
+                            early_info = utm_map[d_early]
+                            later_info = utm_map[d_later]
 
-                        # Name and path: {short}_{layer}_{LATER}_minus_{EARLIER}_log_diff.tif
-                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_log-diff.tif"
-                        diff_path = (mode_dir / "data") / diff_name
+                            # The UTM/CRS check is now mostly redundant since they are grouped.
+                            crs_a = early_info["crs"]
+                            crs_b = later_info["crs"]
+                            if not same_utm_zone(crs_a, crs_b):
+                                skipped.append({
+                                    "short_name": short_name_k,
+                                    "layer": layer_k,
+                                    "date_earlier": d_early,
+                                    "date_later": d_later,
+                                    "utm_suffix": utm_suffix_k, # ADDED
+                                    "crs_earlier": crs_a.to_string() if crs_a else None,
+                                    "crs_later": crs_b.to_string() if crs_b else None,
+                                    "reason": "internal CRS mismatch after grouping (error)"
+                                })
+                                continue
 
-                        try:
-                            compute_and_write_difference(
-                                earlier_path=early_info["path"],
-                                later_path=later_info["path"],
-                                out_path=diff_path,
-                                nodata_value=None,
-                                log=True
-                            )
-                            print(f"[INFO] Wrote diff COG: {diff_path}")
+                            # Name and path: {short}_{layer}_{LATER}_{EARLIER}{UTM}_log_diff.tif
+                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}{utm_suffix_k}_log-diff.tif" # ADDED UTM SUFFIX
+                            diff_path = (mode_dir / "data") / diff_name
                             
-                            # Make a map with PyGMT
-                            diff_date_str = f"{d_later}_{d_early}"
-                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
+                            try:
+                                compute_and_write_difference(
+                                    earlier_path=early_info["path"],
+                                    later_path=later_info["path"],
+                                    out_path=diff_path,
+                                    nodata_value=None,
+                                    log=True
+                                )
+                                print(f"[INFO] Wrote diff COG: {diff_path}")
+                                
+                                # Make a map with PyGMT
+                                diff_date_str = f"{d_later}_{d_early}"
+                                map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True, utm_suffix=utm_suffix_k) # ADDED utm_suffix
 
-                            # Make a PDF layout
-                            if map_name:
-                                diff_date_str = f"{d_early}, {d_later}"
-                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title, reclassify_snow_ice)
+                                # Make a PDF layout
+                                if map_name:
+                                    diff_date_str_layout = f"{d_early}, {d_later}"
+                                    make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice, utm_suffix=utm_suffix_k) # ADDED utm_suffix
 
-                        except Exception as e:
-                            skipped.append({
-                                "short_name": short_name_k,
-                                "layer": layer_k,
-                                "date_earlier": d_early,
-                                "date_later": d_later,
-                                "error": str(e),
-                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
-                            })
-
-                        # Make a map with PyGMT
-                        diff_date_str = f"{d_later}_{d_early}"
-                        map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
-
-                        # Make a PDF layout
-                        if map_name:
-                            diff_date_str = f"{d_early}, {d_later}"
-                            make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str, layout_title, reclassify_snow_ice)
+                            except Exception as e:
+                                skipped.append({
+                                    "short_name": short_name_k,
+                                    "layer": layer_k,
+                                    "date_earlier": d_early,
+                                    "date_later": d_later,
+                                    "utm_suffix": utm_suffix_k, # ADDED
+                                    "error": str(e),
+                                    "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
+                                })
 
         # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "log-difference_skipped_pairs.json"
@@ -1075,9 +1122,10 @@ def expand_region_to_aspect(region, target_aspect):
 
     return [xmin, xmax, ymin, ymax]
 
-def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=None, is_difference=False):
+def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=None, is_difference=False, utm_suffix=""):
     """
     Create a map using PyGMT from the provided mosaic path.
+    
     Args:
         maps_dir (Path): Directory where the map will be saved.
         mosaic_path (Path): Path to the mosaic file.
@@ -1087,6 +1135,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
         bbox (list): Bounding box in the form [South, North, West, East].
         zoom_bbox (list, optional): Bounding box for the zoom-in inset map, in the form [South, North, West, East].
         is_difference (bool, optional): Flag to indicate if the mosaic is a difference product. Defaults to False.
+        utm_suffix (str, optional): UTM zone suffix (e.g., '_18N') for unique naming. Defaults to "".
 
     Returns:
         map_name (Path): Path to the saved map image.
@@ -1099,421 +1148,438 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
     from pyproj import Geod
     import math
     import re
+    import os
+
 
     # Check whether the product is a difference product
     if is_difference:
-        match = re.search(r'(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})_(?:log-)?diff', str(mosaic_path))
+        match = re.search(r'(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})_(\_\d+N|\_\d+S|\_EPSG\d+|\_Hash\d+)?(?:log-)?diff', str(mosaic_path))
         if match:
             date_later = match.group(1)
             date_earlier = match.group(2)
             date_str = f"{date_later}_{date_earlier}_diff" 
         else:
-            date_str = date 
+            date_str = date
     else:
         date_str = date
 
-    # Output map name for WGS84 product
-    mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", "_WGS84.tif"))
+    # Create a temporary path for the WGS84 reprojected file
+    mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", f"_WGS84_TMP{utm_suffix}.tif")) 
 
-    # Reproject to WGS84
-    gdal.Warp(
-        mosaic_wgs84,
-        mosaic_path,
-        dstSRS='EPSG:4326',
-        resampleAlg='near',
-        creationOptions=['COMPRESS=DEFLATE']
-    )
+    def cleanup_temp_file(filepath):
+        """Helper to safely remove the temporary file."""
+        if filepath.exists():
+            try:
+                os.remove(filepath)
+            except Exception as e:
+                print(f"[WARN] Failed to clean up temporary WGS84 file {filepath}: {e}")
 
-    # Load mosaic
-    grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
     try:
-        nodata_value = grd.rio.nodata
-    except AttributeError:
-        print("Warning: 'nodata' attribute not found. Defaulting to 255.")
-        nodata_value = 255
-    if nodata_value is not None:
-        grd = grd.where(grd != nodata_value)
-    else:
-        print("Warning: No nodata value found or set. Skipping nodata removal.")
+        # Reproject to WGS84 (into the temp file)
+        gdal.Warp(
+            mosaic_wgs84,
+            mosaic_path,
+            dstSRS='EPSG:4326',
+            resampleAlg='near',
+            creationOptions=['COMPRESS=DEFLATE']
+        )
 
-    # Define region
-    region = [bbox[2], bbox[3], bbox[0], bbox[1]]  # [xmin, xmax, ymin, ymax]
-    
-    # Define target aspect ratio
-    # To match matplotlib layout: extent=[0, 60, 0, 100] → aspect ratio = width / height
-    target_aspect = 60 / 100
-
-    # Pad region to match target aspect ratio
-    region_padded = expand_region_to_aspect(region, target_aspect)
-
-    # Define projection
-    center_lon = (region_padded[0] + region_padded[1]) / 2
-    projection_width_cm = 15  # can be any fixed value; output height adjusts
-    projection = f"M{center_lon}/{projection_width_cm}c"
-
-    # Create PyGMT figure
-    fig = pygmt.Figure()
-
-    # Base coast layer (optional)
-    fig.coast(
-        region=region_padded,
-        projection=projection,
-        borders="2/thin",
-        shorelines="thin",
-        land="grey",
-        water="lightblue",
-        #frame="a",
-    )
-
-    # Make the map for difference products (if applicable)
-    if is_difference:
-        data_values = grd.values[~np.isnan(grd.values)]
-        if len(data_values) == 0:
-            print(f"[WARN] Difference product {mosaic_path} has no valid data after nodata removal. Skipping map generation.")
-            return None # Skip map generation
-
-        # Calculate the 2nd and 98th percentiles
-        p2, p98 = np.percentile(data_values, [2, 98])
-
-        # For difference products, ensure the color scale is symmetric around zero
-        symmetric_limit = max(abs(p2), abs(p98))
-        p_min = -symmetric_limit
-        p_max = symmetric_limit
-
-        # Calculate increment for 1000 steps
-        inc = (p_max - p_min) / 1000.0
+        # Load mosaic from the temporary file
+        grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
         
-        cpt_name = "difference_cpt" 
+        try:
+            nodata_value = grd.rio.nodata
+        except AttributeError:
+            print("Warning: 'nodata' attribute not found. Defaulting to 255.")
+            nodata_value = 255
+        if nodata_value is not None:
+            grd = grd.where(grd != nodata_value)
+        else:
+            print("Warning: No nodata value found or set. Skipping nodata removal.")
 
-        # Use a good diverging colormap (e.g., 'vik' or 'balance')
-        pygmt.makecpt(
-            cmap='vik',
-            series=[p_min, p_max, inc],      
-            output=cpt_name,            
-            continuous=True
-        )
-
-        fig.grdimage(
-            grid=grd,
-            region=region_padded,
-            projection=projection,
-            cmap=cpt_name,
-            frame=["WSne", 'xaf', 'yaf'],
-            nan_transparent=True
-        )
-
-        # Set the colorbar label based on the type of difference
-        if '_log-diff.tif' in str(mosaic_path):
-            cbar_label = 'Normalized backscatter (@~g@~@-0@-) difference (dB)'
-        else: # Regular difference
-            cbar_label = 'Difference in water extent (unitless)'
-
-        fig.colorbar(
-            cmap=cpt_name,
-            frame=[f'x+l{cbar_label}']
-        )
-
-    # Add grid image (based on product/layer)
-    elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'WTR':
-        color_palette = 'palettes/DSWx-HLS_WTR.cpt'
-        fig.grdimage(
-            grid=grd,
-            region=region_padded,
-            projection=projection,
-            cmap=color_palette,
-            frame=["WSne", 'xaf', 'yaf'],
-            nan_transparent=True
-        )
-        fig.colorbar(
-            cmap=color_palette,
-            equalsize=1.5,
-        )
-
-    elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'BWTR':
-        color_palette = 'palettes/DSWx-HLS_BWTR.cpt'
-        fig.grdimage(
-            grid=grd,
-            region=region_padded,
-            projection=projection,
-            cmap=color_palette,
-            frame=["WSne", 'xaf', 'yaf'],
-            nan_transparent=True
-        )
-        fig.colorbar(
-            cmap=color_palette,
-            equalsize=1.5,
-        )
-
-    elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'WTR':
-        color_palette = 'palettes/DSWx-S1_WTR.cpt'
-        fig.grdimage(
-            grid=grd,
-            region=region_padded,
-            projection=projection,
-            cmap=color_palette,
-            frame=["WSne", 'xaf', 'yaf'],
-            nan_transparent=True
-        )
-        fig.colorbar(
-            cmap=color_palette,
-            equalsize=1.5,
-        )
-
-    elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'BWTR':
-        color_palette = 'palettes/DSWx-S1_BWTR.cpt'
-        fig.grdimage(
-            grid=grd,
-            region=region_padded,
-            projection=projection,
-            cmap=color_palette,
-            frame=["WSne", 'xaf', 'yaf'],
-            nan_transparent=True
-        )
-        fig.colorbar(
-            cmap=color_palette,
-            equalsize=1.5,
-        )
-
-    elif layer == "VEG-ANOM-MAX":
-        color_palette = 'palettes/VEG-ANOM-MAX.cpt'
-        fig.grdimage(
-            grid=grd,
-            region=region_padded,
-            projection=projection,
-            cmap=color_palette,
-            frame=["WSne", 'xaf', 'yaf'],
-            nan_transparent=True
-        )
-        fig.colorbar(
-            cmap=color_palette,
-            frame="xaf+lVEG-ANOM-MAX(%)",
-        )
-
-    elif layer == "VEG-DIST-STATUS":
-        color_palette = 'palettes/VEG-DIST-STATUS.cpt'
-        fig.grdimage(
-            grid=grd,
-            region=region_padded,
-            projection=projection,
-            cmap=color_palette,
-            frame=["WSne", 'xaf', 'yaf'],
-            nan_transparent=True
-        )
-        fig.colorbar(
-            cmap=color_palette,
-            equalsize=1.5,
-        )
-
-    elif short_name.startswith('OPERA_L2_RTC'):
+        # Define region
+        region = [bbox[2], bbox[3], bbox[0], bbox[1]]  # [xmin, xmax, ymin, ymax]
         
-        data_values = grd.values[~np.isnan(grd.values)]
-    
-        # Calculate the 2nd and 98th percentiles
-        p2, p98 = np.percentile(data_values, [2, 98])
-        
-        # Ensure min is less than max
-        if p2 >= p98:
-             p2 -= 0.01
-             p98 += 0.01
+        # Define target aspect ratio
+        target_aspect = 60 / 100
 
-        # Calculate increment for 1000 steps
-        inc = (p98 - p2) / 1000.0
+        # Pad region to match target aspect ratio
+        region_padded = expand_region_to_aspect(region, target_aspect)
 
-        cpt_name = "rtc_grayscale" 
+        # Define projection
+        center_lon = (region_padded[0] + region_padded[1]) / 2
+        projection_width_cm = 15
+        projection = f"M{center_lon}/{projection_width_cm}c"
 
-        pygmt.makecpt(
-            cmap='gray',
-            series=[p2, p98, inc],      
-            output=cpt_name,            
-            continuous=True
-        )
+        # Create PyGMT figure
+        fig = pygmt.Figure()
 
-        fig.grdimage(
-            grid=grd,
-            region=region_padded,
-            projection=projection,
-            cmap=cpt_name,
-            frame=["WSne", 'xaf', 'yaf'],
-            nan_transparent=True
-        )
-        
-        fig.colorbar(
-            cmap=cpt_name,
-            frame=['x+lNormalized backscatter (@~g@~@-0@-)']
-        )
-
-    # Add scalebar and compass rose
-    xmin, xmax, ymin, ymax = region_padded
-    center_lat = (ymin + ymax) / 2
-    geod = Geod(ellps="WGS84")
-    _, _, distance_m = geod.inv(xmin, center_lat, xmax, center_lat)
-
-    # Set scalebar to ~25% of region width
-    raw_length_km = distance_m * 0.25 / 1000  # 25% of map width in km
-    exponent = math.floor(math.log10(raw_length_km))
-    base = 10 ** exponent
-
-    for factor in [1, 2, 5, 10]:
-        scalebar_length_km = base * factor
-        if scalebar_length_km >= raw_length_km:
-            break
-        
-    fig.basemap(map_scale=f"jBR+o1c/0.6c+c-7+w{scalebar_length_km:.0f}k+f+lkm+ar",
-                box=Box(fill="white@30", pen="0.5p,gray30,solid", radius="3p"))
-    
-    fig.basemap(rose="jTR+o0.6c/0.2c+w1.5c",
-                box=Box(fill="white@30", pen="0.5p,gray30,solid", radius="3p"))
-
-    bounds = grd.rio.bounds()
-    region = [bounds[0], bounds[2], bounds[1], bounds[3]]
-    region_expanded_main = expand_region(region, width_deg=25, height_deg=15)
-
-    # Add inset map (regional context)
-    with fig.inset(
-        position="jBL+o0.2c/0.2c",
-        box="+pblack",
-        region=region_expanded_main,
-        projection="M5c",
-    ):
-        # Use a plotting method to create a figure inside the inset.
+        # Base coast layer (optional)
         fig.coast(
-            land="gray",
-            borders=[1, 2],
-            shorelines="1/thin",
-            water="white",
-        )
-        # Coordinates for rectangular outline of the main region
-        xmin, xmax, ymin, ymax = region_padded
-        rectangle = [
-            [xmin, ymin],
-            [xmax, ymin],
-            [xmax, ymax],
-            [xmin, ymax],
-            [xmin, ymin],
-        ]
-
-        # Plot the rectangle on the inset
-        fig.plot(
-            x=[pt[0] for pt in rectangle],
-            y=[pt[1] for pt in rectangle],
-            pen="2p,red"
+            region=region_padded,
+            projection=projection,
+            borders="2/thin",
+            shorelines="thin",
+            land="grey",
+            water="lightblue",
         )
 
-    # Optional inset for the zoom-in bbox (bottom right, include a scalebar)
-    if zoom_bbox:
-        zoom_region = [zoom_bbox[2], zoom_bbox[3], zoom_bbox[0], zoom_bbox[1]]
+        # Make the map for difference products (if applicable)
+        if is_difference:
+            data_values = grd.values[~np.isnan(grd.values)]
+            if len(data_values) == 0:
+                print(f"[WARN] Difference product {mosaic_path} has no valid data after nodata removal. Skipping map generation.")
+                cleanup_temp_file(mosaic_wgs84) # Cleanup on exit point
+                return None # Skip map generation
 
-        # Calculate scale bar length for the zoom inset
-        xmin_z, xmax_z, ymin_z, ymax_z = zoom_region
-        center_lat_z = (ymin_z + ymax_z) / 2
-        
-        _, _, distance_m_z = geod.inv(xmin_z, center_lat_z, xmax_z, center_lat_z)
-        raw_length_km_z = distance_m_z * 0.25 / 1000 # 25% of inset width in km
+            # Calculate the 2nd and 98th percentiles
+            p2, p98 = np.percentile(data_values, [2, 98])
 
-        scalebar_length_km_z = 1 # Default fallback
-        if raw_length_km_z > 0:
-            exponent_z = math.floor(math.log10(raw_length_km_z))
-            base_z = 10 ** exponent_z
+            # For difference products, ensure the color scale is symmetric around zero
+            symmetric_limit = max(abs(p2), abs(p98))
+            p_min = -symmetric_limit
+            p_max = symmetric_limit
 
-            for factor in [1, 2, 5, 10]:
-                scalebar_length_z = base_z * factor
-                if scalebar_length_z >= raw_length_km_z:
-                    scalebar_length_km_z = scalebar_length_z
-                    break
-
-        with fig.inset(
-            position="jBR+o0.5c/1.5c", 
-            box="+p1p,magenta",
-            region=zoom_region,
-            projection="M5c",
-        ):
+            # Calculate increment for 1000 steps
+            inc = (p_max - p_min) / 1000.0
             
-            # Add coastline to inset
-            fig.coast(
-                region=zoom_region,
-                projection="M5c",
-                borders="1/thin",
-                shorelines="thin",
-                land="grey",
-                water="lightblue",
+            cpt_name = "difference_cpt" 
+
+            # Use a good diverging colormap (e.g., 'vik' or 'balance')
+            pygmt.makecpt(
+                cmap='vik',
+                series=[p_min, p_max, inc],      
+                output=cpt_name,            
+                continuous=True
             )
 
-            # Re-plot the data for the inset map
-            if short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'WTR':
-                fig.grdimage(
-                    grid=grd,
-                    region=zoom_region,
-                    projection="M5c",
-                    cmap=color_palette,
-                    nan_transparent=True,
-                )
-            elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'BWTR':
-                fig.grdimage(
-                    grid=grd,
-                    region=zoom_region,
-                    projection="M5c",
-                    cmap=color_palette,
-                    nan_transparent=True
-                )
-            elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'WTR':
-                fig.grdimage(
-                    grid=grd,
-                    region=zoom_region,
-                    projection="M5c",
-                    cmap=color_palette,
-                    nan_transparent=True
-                )
-            elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'BWTR':
-                fig.grdimage(
-                    grid=grd,
-                    region=zoom_region,
-                    projection="M5c",
-                    cmap=color_palette,
-                    nan_transparent=True
-                )
-            elif layer == "VEG-ANOM-MAX":
-                fig.grdimage(
-                    grid=grd,
-                    region=zoom_region,
-                    projection="M5c",
-                    cmap=color_palette,
-                    nan_transparent=True
-                )
-            elif layer == "VEG-DIST-STATUS":
-                fig.grdimage(
-                    grid=grd,
-                    region=zoom_region,
-                    projection="M5c",
-                    cmap=color_palette,
-                    nan_transparent=True
-                )
-            elif short_name.startswith('OPERA_L2_RTC'):
-                fig.grdimage(
-                    grid=grd,
-                    region=zoom_region,
-                    projection="M5c",
-                    cmap=cpt_name,
-                    nan_transparent=True
-                )
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=cpt_name,
+                frame=["WSne", 'xaf', 'yaf'],
+                nan_transparent=True
+            )
+
+            # Set the colorbar label based on the type of difference
+            if '_log-diff.tif' in str(mosaic_path):
+                cbar_label = 'Normalized backscatter (@~g@~@-0@-) difference (dB)'
+            else: # Regular difference
+                cbar_label = 'Difference in water extent (unitless)'
+
+            fig.colorbar(
+                cmap=cpt_name,
+                frame=[f'x+l{cbar_label}']
+            )
+
+        # Add grid image (based on product/layer)
+        elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'WTR':
+            color_palette = 'palettes/DSWx-HLS_WTR.cpt'
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", 'xaf', 'yaf'],
+                nan_transparent=True
+            )
+            fig.colorbar(
+                cmap=color_palette,
+                equalsize=1.5,
+            )
+
+        elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'BWTR':
+            color_palette = 'palettes/DSWx-HLS_BWTR.cpt'
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", 'xaf', 'yaf'],
+                nan_transparent=True
+            )
+            fig.colorbar(
+                cmap=color_palette,
+                equalsize=1.5,
+            )
+
+        elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'WTR':
+            color_palette = 'palettes/DSWx-S1_WTR.cpt'
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", 'xaf', 'yaf'],
+                nan_transparent=True
+            )
+            fig.colorbar(
+                cmap=color_palette,
+                equalsize=1.5,
+            )
+
+        elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'BWTR':
+            color_palette = 'palettes/DSWx-S1_BWTR.cpt'
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", 'xaf', 'yaf'],
+                nan_transparent=True
+            )
+            fig.colorbar(
+                cmap=color_palette,
+                equalsize=1.5,
+            )
+
+        elif layer == "VEG-ANOM-MAX":
+            color_palette = 'palettes/VEG-ANOM-MAX.cpt'
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", 'xaf', 'yaf'],
+                nan_transparent=True
+            )
+            fig.colorbar(
+                cmap=color_palette,
+                frame="xaf+lVEG-ANOM-MAX(%)",
+            )
+
+        elif layer == "VEG-DIST-STATUS":
+            color_palette = 'palettes/VEG-DIST-STATUS.cpt'
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", 'xaf', 'yaf'],
+                nan_transparent=True
+            )
+            fig.colorbar(
+                cmap=color_palette,
+                equalsize=1.5,
+            )
+
+        elif short_name.startswith('OPERA_L2_RTC'):
             
-            # Add scale bar to the inset map. Use Bottom-Left (jBL) inside the inset frame.
-            fig.basemap(map_scale=f"jBL+o-0.5c/-0.5c+c-7+w{scalebar_length_km_z:.0f}k+f+lkm+ar",
-                        box=Box(fill="white@30", pen="0.5p,gray30,solid", radius="3p"))
+            data_values = grd.values[~np.isnan(grd.values)]
+        
+            # Calculate the 2nd and 98th percentiles
+            p2, p98 = np.percentile(data_values, [2, 98])
             
-        # Plot a rectangle on the main map to show the zoom area
-        fig.plot(
-            x=[zoom_region[0], zoom_region[1], zoom_region[1], zoom_region[0], zoom_region[0]],
-            y=[zoom_region[2], zoom_region[2], zoom_region[3], zoom_region[3], zoom_region[2]],
-            pen="1p,magenta"
-        )
+            # Ensure min is less than max
+            if p2 >= p98:
+                 p2 -= 0.01
+                 p98 += 0.01
 
-    # Export map
-    map_name = maps_dir / f"{short_name}_{layer}_{date}_map.png"
-    fig.savefig(map_name, dpi=900)
+            # Calculate increment for 1000 steps
+            inc = (p98 - p2) / 1000.0
 
-    return map_name
+            cpt_name = "rtc_grayscale" 
 
-def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice=False):
+            pygmt.makecpt(
+                cmap='gray',
+                series=[p2, p98, inc],      
+                output=cpt_name,            
+                continuous=True
+            )
+
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=cpt_name,
+                frame=["WSne", 'xaf', 'yaf'],
+                nan_transparent=True
+            )
+            
+            fig.colorbar(
+                cmap=cpt_name,
+                frame=['x+lNormalized backscatter (@~g@~@-0@-)']
+            )
+
+        # Add scalebar and compass rose
+        xmin, xmax, ymin, ymax = region_padded
+        center_lat = (ymin + ymax) / 2
+        geod = Geod(ellps="WGS84")
+        _, _, distance_m = geod.inv(xmin, center_lat, xmax, center_lat)
+
+        # Set scalebar to ~25% of region width
+        raw_length_km = distance_m * 0.25 / 1000
+        exponent = math.floor(math.log10(raw_length_km))
+        base = 10 ** exponent
+
+        for factor in [1, 2, 5, 10]:
+            scalebar_length_km = base * factor
+            if scalebar_length_km >= raw_length_km:
+                break
+            
+        fig.basemap(map_scale=f"jBR+o1c/0.6c+c-7+w{scalebar_length_km:.0f}k+f+lkm+ar",
+                    box=Box(fill="white@30", pen="0.5p,gray30,solid", radius="3p"))
+        
+        fig.basemap(rose="jTR+o0.6c/0.2c+w1.5c",
+                    box=Box(fill="white@30", pen="0.5p,gray30,solid", radius="3p"))
+
+        bounds = grd.rio.bounds()
+        region = [bounds[0], bounds[2], bounds[1], bounds[3]]
+        region_expanded_main = expand_region(region, width_deg=25, height_deg=15)
+
+        # Add inset map (regional context)
+        with fig.inset(
+            position="jBL+o0.2c/0.2c",
+            box="+pblack",
+            region=region_expanded_main,
+            projection="M5c",
+        ):
+            # Use a plotting method to create a figure inside the inset.
+            fig.coast(
+                land="gray",
+                borders=[1, 2],
+                shorelines="1/thin",
+                water="white",
+            )
+            # Coordinates for rectangular outline of the main region
+            xmin, xmax, ymin, ymax = region_padded
+            rectangle = [
+                [xmin, ymin],
+                [xmax, ymin],
+                [xmax, ymax],
+                [xmin, ymax],
+                [xmin, ymin],
+            ]
+
+            # Plot the rectangle on the inset
+            fig.plot(
+                x=[pt[0] for pt in rectangle],
+                y=[pt[1] for pt in rectangle],
+                pen="2p,red"
+            )
+
+        # Optional inset for the zoom-in bbox (bottom right, include a scalebar)
+        if zoom_bbox:
+            zoom_region = [zoom_bbox[2], zoom_bbox[3], zoom_bbox[0], zoom_bbox[1]]
+
+            # Calculate scale bar length for the zoom inset
+            xmin_z, xmax_z, ymin_z, ymax_z = zoom_region
+            center_lat_z = (ymin_z + ymax_z) / 2
+            
+            _, _, distance_m_z = geod.inv(xmin_z, center_lat_z, xmax_z, center_lat_z)
+            raw_length_km_z = distance_m_z * 0.25 / 1000 # 25% of inset width in km
+
+            scalebar_length_km_z = 1 # Default fallback
+            if raw_length_km_z > 0:
+                exponent_z = math.floor(math.log10(raw_length_km_z))
+                base_z = 10 ** exponent_z
+
+                for factor in [1, 2, 5, 10]:
+                    scalebar_length_z = base_z * factor
+                    if scalebar_length_z >= raw_length_km_z:
+                        scalebar_length_km_z = scalebar_length_z
+                        break
+
+            with fig.inset(
+                position="jBR+o0.5c/1.5c", 
+                box="+p1p,magenta",
+                region=zoom_region,
+                projection="M5c",
+            ):
+                
+                # Add coastline to inset
+                fig.coast(
+                    region=zoom_region,
+                    projection="M5c",
+                    borders="1/thin",
+                    shorelines="thin",
+                    land="grey",
+                    water="lightblue",
+                )
+
+                # Re-plot the data for the inset map
+                if short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'WTR':
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=color_palette,
+                        nan_transparent=True,
+                    )
+                elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'BWTR':
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=color_palette,
+                        nan_transparent=True
+                    )
+                elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'WTR':
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=color_palette,
+                        nan_transparent=True
+                    )
+                elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'BWTR':
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=color_palette,
+                        nan_transparent=True
+                    )
+                elif layer == "VEG-ANOM-MAX":
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=color_palette,
+                        nan_transparent=True
+                    )
+                elif layer == "VEG-DIST-STATUS":
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=color_palette,
+                        nan_transparent=True
+                    )
+                elif short_name.startswith('OPERA_L2_RTC'):
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=cpt_name,
+                        nan_transparent=True
+                    )
+                
+                # Add scale bar to the inset map. Use Bottom-Left (jBL) inside the inset frame.
+                fig.basemap(map_scale=f"jBL+o-0.5c/-0.5c+c-7+w{scalebar_length_km_z:.0f}k+f+lkm+ar",
+                            box=Box(fill="white@30", pen="0.5p,gray30,solid", radius="3p"))
+                
+            # Plot a rectangle on the main map to show the zoom area
+            fig.plot(
+                x=[zoom_region[0], zoom_region[1], zoom_region[1], zoom_region[0], zoom_region[0]],
+                y=[zoom_region[2], zoom_region[2], zoom_region[3], zoom_region[3], zoom_region[2]],
+                pen="1p,magenta"
+            )
+
+        # Export map
+        map_name = maps_dir / f"{short_name}_{layer}_{date}{utm_suffix}_map.png"
+        fig.savefig(map_name, dpi=900)
+        cleanup_temp_file(mosaic_wgs84) 
+
+        return map_name
+
+    except Exception as e:
+        cleanup_temp_file(mosaic_wgs84) 
+        print(f"[ERROR] An error occurred during map generation for {mosaic_path}: {e}")
+        raise
+
+def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice=False, utm_suffix=""):
     """
     Create a layout using matplotlib for the provided map.
     Args:
@@ -1532,6 +1598,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
     import textwrap
     from matplotlib.offsetbox import OffsetImage, AnnotationBbox
     from matplotlib.image import imread
+    import matplotlib.pyplot as plt
 
 
     # Create blank figure
@@ -1707,7 +1774,8 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
 
     plt.tight_layout()
 
-    layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
+    # layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
+    layout_name = layout_dir / f"{short_name}_{layer}_{date}{utm_suffix}_layout.pdf" # ADDED utm_suffix
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
     return 
 
