@@ -844,7 +844,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata)
 
                     # Create filename and full paths
-                    mosaic_name = f"{short_name}_{layer}_{date}{utm_suffix}_mosaic.tif" # ADDED UTM SUFFIX
+                    mosaic_name = f"{short_name}_{layer}_{date}{utm_suffix}_mosaic.tif"
                     mosaic_path = data_dir / mosaic_name
                     tmp_path = data_dir / f"tmp_{mosaic_name}"
 
@@ -886,7 +886,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                         "crs": mosaic_crs
                     }
                     # Make a map with PyGMT
-                    map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox, utm_suffix=utm_suffix)
+                    map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox, is_difference=False, utm_suffix=utm_suffix)
 
                     # Make a PDF layout
                     make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice, utm_suffix=utm_suffix)
@@ -952,12 +952,12 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                 
                                 # Make a map with PyGMT
                                 diff_date_str = f"{d_later}_{d_early}"
-                                map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True, utm_suffix=utm_suffix_k) # ADDED utm_suffix
+                                map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True, utm_suffix=utm_suffix_k)
 
                                 # Make a PDF layout
                                 if map_name:
                                     diff_date_str_layout = f"{d_early}, {d_later}"
-                                    make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice, utm_suffix=utm_suffix_k) # ADDED utm_suffix
+                                    make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice, utm_suffix=utm_suffix_k)
                             
                             except Exception as e:
                                 skipped.append({
@@ -965,7 +965,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                     "layer": layer_k,
                                     "date_earlier": d_early,
                                     "date_later": d_later,
-                                    "utm_suffix": utm_suffix_k, # ADDED
+                                    "utm_suffix": utm_suffix_k,
                                     "error": str(e),
                                     "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
                                 })
@@ -1014,7 +1014,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                     "layer": layer_k,
                                     "date_earlier": d_early,
                                     "date_later": d_later,
-                                    "utm_suffix": utm_suffix_k, # ADDED
+                                    "utm_suffix": utm_suffix_k,
                                     "crs_earlier": crs_a.to_string() if crs_a else None,
                                     "crs_later": crs_b.to_string() if crs_b else None,
                                     "reason": "internal CRS mismatch after grouping (error)"
@@ -1022,7 +1022,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                 continue
 
                             # Name and path: {short}_{layer}_{LATER}_{EARLIER}{UTM}_log_diff.tif
-                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}{utm_suffix_k}_log-diff.tif" # ADDED UTM SUFFIX
+                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}{utm_suffix_k}_log-diff.tif"
                             diff_path = (mode_dir / "data") / diff_name
                             
                             try:
@@ -1037,12 +1037,12 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                 
                                 # Make a map with PyGMT
                                 diff_date_str = f"{d_later}_{d_early}"
-                                map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True, utm_suffix=utm_suffix_k) # ADDED utm_suffix
+                                map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True, utm_suffix=utm_suffix_k)
 
                                 # Make a PDF layout
                                 if map_name:
                                     diff_date_str_layout = f"{d_early}, {d_later}"
-                                    make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice, utm_suffix=utm_suffix_k) # ADDED utm_suffix
+                                    make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice, utm_suffix=utm_suffix_k)
 
                             except Exception as e:
                                 skipped.append({
@@ -1050,7 +1050,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                     "layer": layer_k,
                                     "date_earlier": d_early,
                                     "date_later": d_later,
-                                    "utm_suffix": utm_suffix_k, # ADDED
+                                    "utm_suffix": utm_suffix_k,
                                     "error": str(e),
                                     "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
                                 })
@@ -1775,7 +1775,7 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
     plt.tight_layout()
 
     # layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
-    layout_name = layout_dir / f"{short_name}_{layer}_{date}{utm_suffix}_layout.pdf" # ADDED utm_suffix
+    layout_name = layout_dir / f"{short_name}_{layer}_{date}{utm_suffix}_layout.pdf"
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
     return 
 
