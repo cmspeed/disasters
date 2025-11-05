@@ -95,9 +95,8 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "-rc", "--reclassify_snow_ice", type=str, required=False, default="False",
-        choices=["True", "False"],
-        help="Whether to reclassify false snow/ice positives as water in DSWx-HLS products ONLY ('True'/'False'). Default is 'False'."
+        "-rc", "--reclassify_snow_ice", action='store_true', required=False, 
+        help="Flag to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. Default is False."
     )
 
     return parser.parse_args()
@@ -709,7 +708,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                         DS, date_DS, conf_DS = compile_and_load_data(urls, mode, 
                                                                         conf_layer_links=conf_layer_links,
                                                                         date_layer_links=date_layer_links)
-                        
+
                         if filter_date:
                             date_threshold = compute_date_threshold(filter_date)
                             layout_date = str(filter_date)
@@ -819,7 +818,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     # Filtering/Reclassification (Per CRS Group)
                     if mode == "fire" or (mode == "landslide" and short_name.startswith('OPERA_L3_DIST')):
                         # Filter DIST layers by date and confidence
-                        ds_group = filter_by_date_and_confidence(ds_group, current_date_DS, date_threshold, DS_conf=current_conf_DS, confidence_threshold=100, fill_value=None)
+                        ds_group = filter_by_date_and_confidence(ds_group, current_date_DS, date_threshold, DS_conf=current_conf_DS, confidence_threshold=0, fill_value=None)
                     
                     elif mode == "flood":
                         # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
@@ -1214,6 +1213,9 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
         # Create PyGMT figure
         fig = pygmt.Figure()
 
+        # Control map annotation font size
+        pygmt.config(FONT_ANNOT="6p")
+
         # Base coast layer (optional)
         fig.coast(
             region=region_padded,
@@ -1286,7 +1288,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
             )
             fig.colorbar(
                 cmap=color_palette,
-                equalsize=1.5,
+                equalsize=1.5
             )
 
         elif short_name == 'OPERA_L3_DSWX-HLS_V1' and layer == 'BWTR':
@@ -1301,7 +1303,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
             )
             fig.colorbar(
                 cmap=color_palette,
-                equalsize=1.5,
+                equalsize=1.5
             )
 
         elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'WTR':
@@ -1316,7 +1318,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
             )
             fig.colorbar(
                 cmap=color_palette,
-                equalsize=1.5,
+                equalsize=1.5
             )
 
         elif short_name == 'OPERA_L3_DSWX-S1_V1' and layer == 'BWTR':
@@ -1331,7 +1333,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
             )
             fig.colorbar(
                 cmap=color_palette,
-                equalsize=1.5,
+                equalsize=1.5
             )
 
         elif layer == "VEG-ANOM-MAX":
@@ -1361,7 +1363,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
             )
             fig.colorbar(
                 cmap=color_palette,
-                equalsize=1.5,
+                equalsize=1.5
             )
 
         elif short_name.startswith('OPERA_L2_RTC'):
@@ -1373,8 +1375,8 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
             
             # Ensure min is less than max
             if p2 >= p98:
-                 p2 -= 0.01
-                 p98 += 0.01
+                p2 -= 0.01
+                p98 += 0.01
 
             # Calculate increment for 1000 steps
             inc = (p98 - p2) / 1000.0
@@ -1646,12 +1648,14 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
     elif short_name == "OPERA_L3_DSWX-HLS_V1":
         subtitle = "OPERA Dynamic Surface Water eXtent from HLS (DSWx-HLS)"
         if reclassify_snow_ice == True:
-            map_information = (
-                f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked " 
-                f"product from Harmonized Landsat and Sentinel-2 data. False snow/ice positive pixels "
-                f"were reclassified as water using the associated DSWx-HLS Confidence layer. "
-                f"This map depicts regions of full surface water and inundated surface water. "
-            )
+            map_information = textwrap.dedent(f"""\
+                The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked 
+                product from Harmonized Landsat and Sentinel-2 data.
+
+                Note: Cloud/cloud shadow and snow/ice layers are derived from HLS Fmask 
+                quality assurance (QA) data, which sometimes misclassifies sediment-rich water as snow/ice. 
+                Snow/ice pixels were reclassified to open water to capture the full inundated extent.
+            """)
         else:
             map_information = (
                 f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-HLS mosaicked "
@@ -1747,29 +1751,29 @@ def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layo
     # Map information text
     ax.text(x_pos, y_start - line_spacing * 6.5, map_information_wrp,
             fontsize=8, ha='left', va='top', transform=ax.transAxes)
-
+    
     # Data sources heading
-    ax.text(x_pos, y_start - line_spacing * 10, "Data Sources:",
+    ax.text(x_pos, y_start - line_spacing * (10 + 1.5), "Data Sources:", 
             fontsize=8, fontweight='bold', ha='left', va='top', transform=ax.transAxes)
 
     # Data sources text
-    ax.text(x_pos, y_start - line_spacing * 10.5, data_sources,
+    ax.text(x_pos, y_start - line_spacing * (10.5 + 1.5), data_sources,
             fontsize=8, ha='left', va='top', transform=ax.transAxes,linespacing=1, wrap=True
     )
     # Data availability heading
-    ax.text(x_pos, y_start - line_spacing * 15, "Product Availability:",
+    ax.text(x_pos, y_start - line_spacing * (15 + 1.5), "Product Availability:",
             fontsize=8, fontweight='bold', ha='left', va='top', transform=ax.transAxes)
 
     # Data availability text
-    ax.text(x_pos, y_start - line_spacing * 15.5, data_availability,
+    ax.text(x_pos, y_start - line_spacing * (15.5 + 1.5), data_availability,
             fontsize=8, ha='left', va='top', linespacing=1, transform=ax.transAxes, wrap=True)
 
     # Disclaimer heading
-    ax.text(x_pos, y_start - line_spacing * 18, "Disclaimer:",
+    ax.text(x_pos, y_start - line_spacing * (18 + 1.5), "Disclaimer:",
             fontsize=8, fontweight='bold', ha='left', va='top', transform=ax.transAxes)
 
     # Disclaimer
-    ax.text(x_pos, y_start - line_spacing * 18.5, disclaimer_wrp,
+    ax.text(x_pos, y_start - line_spacing * (18.5 + 1.5), disclaimer_wrp,
             fontsize=8, ha='left', va='top', transform=ax.transAxes)
 
     plt.tight_layout()
