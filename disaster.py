@@ -286,7 +286,9 @@ def reclassify_snow_ice_as_water(DS, conf_DS):
     
     Returns:
         list: List of updated rioxarray datasets with 252 reclassified as 1.
+        colormap: Colormap from the original datasets (if available).
     """
+    import opera_mosaic
     if conf_DS is None:
         raise ValueError("conf_DS must not be None when reclassifying snow/ice.")
 
@@ -294,6 +296,13 @@ def reclassify_snow_ice_as_water(DS, conf_DS):
         raise ValueError("DS and conf_DS must be the same length.")
     
     values_to_reclassify = [1, 3, 4, 21, 23, 24]
+
+    try:
+        colormap = opera_mosaic.get_image_colormap(DS[0])
+        print(f"colormap successfully retrieved and will be used in reclassified output")
+    except Exception:
+        print("unable to get colormap")
+        colormap = None
 
     updated_list = []
 
@@ -327,7 +336,7 @@ def reclassify_snow_ice_as_water(DS, conf_DS):
 
         updated_list.append(updated)
 
-    return updated_list
+    return updated_list, colormap
 
 def filter_by_date_and_confidence(DS, DS_dates, date_threshold,
                                   DS_conf=None, confidence_threshold=None,
@@ -357,12 +366,21 @@ def filter_by_date_and_confidence(DS, DS_dates, date_threshold,
 
     Returns
     -------
-    list of xr.DataArray
-        Filtered data granules.
+    filtered_list: list of xr.DataArray filtered data granules.
+    colormap: Colormap from the original datasets (if available).
     """
+    import opera_mosaic
+
     assert len(DS) == len(DS_dates), "DS and DS_dates must be same length"
     if DS_conf is not None:
         assert len(DS_conf) == len(DS), "DS_conf must match DS in length"
+
+    try:
+        colormap = opera_mosaic.get_image_colormap(DS[0])
+        print(f"colormap successfully retrieved and will be used in reclassified output")
+    except Exception:
+        print("unable to get colormap")
+        colormap = None
 
     filtered_list = []
 
@@ -415,7 +433,7 @@ def filter_by_date_and_confidence(DS, DS_dates, date_threshold,
 
         filtered_list.append(filtered)
 
-    return filtered_list
+    return filtered_list, colormap
 
 def compute_date_threshold(date_str):
     """
@@ -624,11 +642,13 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
     make_output_dir(layouts_dir)
     
     if mode == "flood":
-        short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+        #short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+        short_names = ["OPERA_L3_DSWX-HLS_V1"]
         layer_names = ["WTR", "BWTR"]
     elif mode == "fire":
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
-        layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
+        #layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
+        layer_names = ["VEG-ANOM-MAX"]
     elif mode == "landslide":
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
         layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS", "RTC-VV", "RTC-VH"]
@@ -687,10 +707,12 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     if filter_date:
                         date_threshold = compute_date_threshold(filter_date)
                         layout_date = str(filter_date)
+                        print(f"date_threshold set to {date_threshold} for filter_date {filter_date}")
                     else:
-                        date_threshold = compute_date_threshold(str(date))
-                        layout_date = str(date)
-                
+                        date_threshold = 0
+                        layout_date = "All Dates"
+                        print(f"date_threshold set to {date_threshold} for filter_date {filter_date}")
+
                 elif mode == "landslide":
                     if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
                         date_column = "Download URL VEG-DIST-DATE"
@@ -712,9 +734,11 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                         if filter_date:
                             date_threshold = compute_date_threshold(filter_date)
                             layout_date = str(filter_date)
+                            print(f"date_threshold set to {date_threshold} for filter_date {filter_date}")
                         else:
-                            date_threshold = compute_date_threshold(str(date))
-                            layout_date = str(date)
+                            date_threshold = 0
+                            layout_date = "All Dates"
+                            print(f"date_threshold set to {date_threshold} for filter_date {filter_date}")
 
                     elif short_name == "OPERA_L2_RTC-S1_V1":
                         DS = compile_and_load_data(urls, mode)
@@ -818,7 +842,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     # Filtering/Reclassification (Per CRS Group)
                     if mode == "fire" or (mode == "landslide" and short_name.startswith('OPERA_L3_DIST')):
                         # Filter DIST layers by date and confidence
-                        ds_group = filter_by_date_and_confidence(ds_group, current_date_DS, date_threshold, DS_conf=current_conf_DS, confidence_threshold=0, fill_value=None)
+                        ds_group, colormap = filter_by_date_and_confidence(ds_group, current_date_DS, date_threshold, DS_conf=current_conf_DS, confidence_threshold=0, fill_value=None)
                     
                     elif mode == "flood":
                         # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
@@ -828,15 +852,16 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                                     print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
                                 else:
                                     print(f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers for CRS {utm_suffix}")
-                                    ds_group = reclassify_snow_ice_as_water(ds_group, current_conf_DS)
+                                    ds_group, colormap = reclassify_snow_ice_as_water(ds_group, current_conf_DS)
                         else:
                             print("[INFO] Snow/ice reclassification not requested; proceeding without reclassification.")
                     
                     # Mosaic the current CRS group
-                    try:
-                        colormap = opera_mosaic.get_image_colormap(ds_group[0])
-                    except Exception:
-                        colormap = None
+                    if colormap is None:
+                        try:
+                            colormap = opera_mosaic.get_image_colormap(ds_group[0])
+                        except Exception:
+                            colormap = None
                         
                     # Mosaic the datasets using the appropriate method/rule
                     mosaic, _, nodata = opera_mosaic.mosaic_opera(ds_group, product=short_name, merge_args={})
