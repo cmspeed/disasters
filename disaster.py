@@ -299,9 +299,9 @@ def reclassify_snow_ice_as_water(DS, conf_DS):
 
     try:
         colormap = opera_mosaic.get_image_colormap(DS[0])
-        print(f"colormap successfully retrieved and will be used in reclassified output")
+        print(f"[INFO] Colormap successfully retrieved and will be used in reclassified output")
     except Exception:
-        print("unable to get colormap")
+        print("[INFO] Unable to get colormap")
         colormap = None
 
     updated_list = []
@@ -377,15 +377,15 @@ def filter_by_date_and_confidence(DS, DS_dates, date_threshold,
 
     try:
         colormap = opera_mosaic.get_image_colormap(DS[0])
-        print(f"colormap successfully retrieved and will be used in reclassified output")
+        print("[INFO] Colormap successfully retrieved and will be used in reclassified output")
     except Exception:
-        print("unable to get colormap")
+        print("[INFO] Unable to get colormap")
         colormap = None
 
     filtered_list = []
 
     for i, (da_data, da_date) in enumerate(zip(DS, DS_dates)):
-        print(f"Filtering granule {i + 1}/{len(DS)}")
+        print(f"[INFO] Filtering granule {i + 1}/{len(DS)}")
 
         # Date mask
         date_mask = da_date >= date_threshold
@@ -393,17 +393,17 @@ def filter_by_date_and_confidence(DS, DS_dates, date_threshold,
         # Optional confidence mask
         if DS_conf is not None and confidence_threshold is not None:
             conf_layer = DS_conf[i]
-            print(f"  Confidence layer shape: {conf_layer.shape}")
+            print(f"[INFO] Confidence layer shape: {conf_layer.shape}")
             total_pixels = conf_layer.size
 
-            # Keep only low-confidence values (<= 100)
+            # Construct confidence mask based on confidence_threshold
             conf_mask = conf_layer >= confidence_threshold
 
             retained_pixels = conf_mask.sum().item()
-            print(f"  Confidence retained: {retained_pixels} / {total_pixels} ({retained_pixels / total_pixels:.2%})")
+            print(f"[INFO] Confidence retained: {retained_pixels} / {total_pixels} ({retained_pixels / total_pixels:.2%})")
 
             max_retained_conf = conf_layer.where(conf_mask).max().item()
-            print(f"  Max confidence among retained pixels: {max_retained_conf}")
+            print(f"[INFO] Max confidence among retained pixels: {max_retained_conf}")
 
             combined_mask = date_mask & conf_mask
         else:
@@ -642,18 +642,16 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
     make_output_dir(layouts_dir)
     
     if mode == "flood":
-        #short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
-        short_names = ["OPERA_L3_DSWX-HLS_V1"]
+        short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
         layer_names = ["WTR", "BWTR"]
     elif mode == "fire":
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
-        #layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
-        layer_names = ["VEG-ANOM-MAX"]
+        layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
     elif mode == "landslide":
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
         layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS", "RTC-VV", "RTC-VH"]
     elif mode == "earthquake":
-        print("Earthquake mode coming soon. Exiting...")
+        print("[INFO] Earthquake mode coming soon. Exiting...")
         return
 
     # Extract and find unique dates, sort them
@@ -683,7 +681,7 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     continue
 
                 print(f"[INFO] Processing {short_name} - {layer} on {date}")
-                print(f"Found {len(urls)} URLs")
+                print(f"[INFO] Found {len(urls)} URLs")
 
                 layout_date = ''
                 DS, conf_DS, date_DS = None, None, None
@@ -707,11 +705,11 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     if filter_date:
                         date_threshold = compute_date_threshold(filter_date)
                         layout_date = str(filter_date)
-                        print(f"date_threshold set to {date_threshold} for filter_date {filter_date}")
+                        print(f"[INFO] date_threshold set to {date_threshold} for filter_date {filter_date}")
                     else:
                         date_threshold = 0
                         layout_date = "All Dates"
-                        print(f"date_threshold set to {date_threshold} for filter_date {filter_date}")
+                        print(f"[INFO] date_threshold set to {date_threshold} for filter_date {filter_date}")
 
                 elif mode == "landslide":
                     if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
@@ -734,11 +732,11 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                         if filter_date:
                             date_threshold = compute_date_threshold(filter_date)
                             layout_date = str(filter_date)
-                            print(f"date_threshold set to {date_threshold} for filter_date {filter_date}")
+                            print(f"[INFO] date_threshold set to {date_threshold} for filter_date {filter_date}")
                         else:
                             date_threshold = 0
                             layout_date = "All Dates"
-                            print(f"date_threshold set to {date_threshold} for filter_date {filter_date}")
+                            print(f"[INFO] date_threshold set to {date_threshold} for filter_date {filter_date}")
 
                     elif short_name == "OPERA_L2_RTC-S1_V1":
                         DS = compile_and_load_data(urls, mode)
@@ -839,24 +837,28 @@ def generate_products(df_opera, mode, mode_dir, layout_title, bbox, zoom_bbox, f
                     current_conf_DS = conf_groups.get(crs_str)
                     current_date_DS = date_groups.get(crs_str)
                     
+                    colormap = None  # Initialize colormap
+
                     # Filtering/Reclassification (Per CRS Group)
                     if mode == "fire" or (mode == "landslide" and short_name.startswith('OPERA_L3_DIST')):
                         # Filter DIST layers by date and confidence
                         ds_group, colormap = filter_by_date_and_confidence(ds_group, current_date_DS, date_threshold, DS_conf=current_conf_DS, confidence_threshold=0, fill_value=None)
                     
                     elif mode == "flood":
-                        # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
-                        if reclassify_snow_ice == True:
-                            if (short_name == "OPERA_L3_DSWX-HLS_V1" and layer in ["BWTR", "WTR"]):
-                                if current_conf_DS is None:
-                                    print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
-                                else:
-                                    print(f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers for CRS {utm_suffix}")
-                                    ds_group, colormap = reclassify_snow_ice_as_water(ds_group, current_conf_DS)
+                        if reclassify_snow_ice == True and short_name == "OPERA_L3_DSWX-HLS_V1" and layer in ["BWTR", "WTR"]:
+                            # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
+                            if current_conf_DS is None:
+                                print(f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}")
+                            else:
+                                print(f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers for CRS {utm_suffix}")
+                                ds_group, colormap = reclassify_snow_ice_as_water(ds_group, current_conf_DS)
                         else:
-                            print("[INFO] Snow/ice reclassification not requested; proceeding without reclassification.")
+                            if reclassify_snow_ice == True and short_name != "OPERA_L3_DSWX-HLS_V1":
+                                print(f"[INFO] Snow/ice reclassification is only applicable to DSWx-HLS. Skipping for {short_name}.")
+                            else:
+                                print("[INFO] Snow/ice reclassification not requested; proceeding without reclassification.")
                     
-                    # Mosaic the current CRS group
+                    # Use pre-determined colormap or make another attempt to get it. If still None, proceed without it.
                     if colormap is None:
                         try:
                             colormap = opera_mosaic.get_image_colormap(ds_group[0])
@@ -1214,12 +1216,12 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
         try:
             nodata_value = grd.rio.nodata
         except AttributeError:
-            print("Warning: 'nodata' attribute not found. Defaulting to 255.")
+            print("[WARN] 'nodata' attribute not found. Defaulting to 255.")
             nodata_value = 255
         if nodata_value is not None:
             grd = grd.where(grd != nodata_value)
         else:
-            print("Warning: No nodata value found or set. Skipping nodata removal.")
+            print("[WARN] No nodata value found or set. Skipping nodata removal.")
 
         # Define region
         region = [bbox[2], bbox[3], bbox[0], bbox[1]]  # [xmin, xmax, ymin, ymax]
@@ -1848,7 +1850,7 @@ def main():
 
     # Terminate if user selects 'earthquake' mode, for now
     if args.mode == "earthquake":
-        print("Earthquake mode coming soon. Exiting...")
+        print("[INFO] Earthquake mode coming soon. Exiting...")
         return
 
     output_dir = next_pass.run_next_pass(
@@ -1865,14 +1867,6 @@ def main():
 
     # Read the metadata CSV file
     df_opera = read_opera_metadata_csv(dest)
-
-    # df_opera = df_opera[~df_opera['Granule ID'].str.contains('_S1C_')]
-
-    # granule_to_remove = 'OPERA_L3_DSWx-S1_T04VCN_20251010T171911Z_20251011T032947Z_S1A_30_v1.0'
-    # df_opera = df_opera[df_opera['Granule ID'] != granule_to_remove]
-
-    # granule_to_remove = 'OPERA_L3_DSWx-S1_T04VCM_20251010T171911Z_20251011T032947Z_S1A_30_v1.0'
-    # df_opera = df_opera[df_opera['Granule ID'] != granule_to_remove]
 
     # Make a new directory with the mode name
     mode_dir = args.output_dir / args.mode
