@@ -62,6 +62,19 @@ python disaster.py -b -24 -23.5 -45.75 -45.5 -o test_landslide_mode -m landslide
 
 ```
 
+#### Example: Generate flood maps over Jamaica for Hurricane Melissa in October 2025
+In this example, misclassified snow/ice classified pixels (likely sediment-rich water) are reclassified to open water using the DIST-HLS Confidence layer.
+Note: All snow/ice/sediment-rich water pixels are not reclassified using this approach.
+```bash
+python disaster.py -b 17.3 18.8 -78.6 -75.6 -m flood -o hurricane_melissa_Oct2025 -rc -lt "Hurricane Melissa, Oct. 2025"
+```
+
+#### Example: Generate disturbance maps over Jamaica for Hurricane Melissa in October 2025
+In this example, a filter data (`-fd`) of October 28, 2025 (coinciding with hurricane landfall) is applied. All disturbance prior to this date is filtered out of the final mosaics.
+```bash
+python disaster.py -b 17.3 18.8 -78.6 -75.6 -m fire -o hurricane_melissa_Oct2025 -lt "Hurricane Melissa, Oct. 2025" -fd 2025-10-28
+```
+
 ### Command-line Arguments
 
 | Argument             | Required | Description                                                                                   |
@@ -72,7 +85,7 @@ python disaster.py -b -24 -23.5 -45.75 -45.5 -o test_landslide_mode -m landslide
 | `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`) |
 | `-lt`, `--layout_title` | Yes     | Title of PDF layout generated for each product |
 | `-fd`, `--filter_date` | No     | Date to use as filter in `fire` mode to remove all disturbance preceding `filter_date` |
-| `-rc`, `--reclassify_snow_ice` | No     | `True` or `False` will control whether DSWx-HLS snow/ice pixels are reclassified as water |
+| `-rc`, `--reclassify_snow_ice` | No     | Flag to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. (Default: False)|
 | `-zb`, `--zoom_box` | No     | Zoom bounding box: `South North West East` (space-separated floats) |
 
 ### Disaster Modes
