@@ -65,8 +65,10 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "-d", "--date", type=str,
-        help="Date string (YYYY-MM-DD) to filter rows by Start Date"
+        "-d", "--date", type=str, required=False,
+        help="Specifies the end date (YYYY-MM-DD) for the OPERA product search. " \
+        "The script will find the 'N' most recent products available on or before this date (where 'N' is set by --number-of-dates argument). " \
+        "Defaults to 'today'."
     )
 
     parser.add_argument(

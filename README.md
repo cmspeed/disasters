@@ -82,6 +82,7 @@ python disaster.py -b 17.3 18.8 -78.6 -75.6 -m fire -o hurricane_melissa_Oct2025
 | `-b`, `--bbox`        | Yes      | Bounding box: `South North West East` (space-separated floats) |
 | `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results |
 | `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, or `earthquake`|
+| `-d`, `--event-date`  | No       | Specifies the end date (YYYY-MM-DD) for the OPERA product search. The script will find the 'N' most recent products available on or before this date (where 'N' is set by --number-of-dates argument). Defaults to 'today'.|
 | `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`) |
 | `-lt`, `--layout_title` | Yes     | Title of PDF layout generated for each product |
 | `-fd`, `--filter_date` | No     | Date to use as filter in `fire` mode to remove all disturbance preceding `filter_date` |
