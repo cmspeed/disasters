@@ -91,7 +91,7 @@ python disaster.py -b 17.3 18.8 -78.6 -75.6 -m fire -o hurricane_melissa_Oct2025
 
 ### Disaster Modes
 
-The `-m / --mode` argument determines which disaster type to process and which NASA OPERA products and data layers are used.
+The `-m / --mode` argument determines which which NASA OPERA products and data layers are used.
 
 | Mode         | OPERA Products                     | Layer(s)                              | Description                                                                 |
 |--------------|------------------------------------|----------------------------------------|-----------------------------------------------------------------------------|
