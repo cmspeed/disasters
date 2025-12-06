@@ -297,10 +297,18 @@ def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
 
 def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
     """
+<<<<<<< HEAD
     Compile and load data from the provided layer links for mosaicking. This modified version
     loads all datasets regardless of their CRS, but filters to the most common Sentinel-1
     unit (S1A or S1C) if applicable.
 
+=======
+    Compile and load data from the provided layer links for mosaicking. If granules span muliple UTM zones, 
+    granules with the less common UTM are reprojected to the most common UTM prior to mosaicking. 
+    If there are S1A and S1C-derived OPERA products over the same area on the same day, only the most common
+    (S1A or S1C) is used in the mosaicking.
+    
+>>>>>>> Update to use most common UTM
     Args:
         data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
@@ -373,9 +381,21 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
     # Load the primary data layer (DS)
     DS = load_datasets(data_layer_links)
 
+    # Identify and sort DS by most common CRS (UTM zone) for reprojection
+    crs_list = [str(ds.rio.crs) for ds in DS]
+    crs_counter = Counter(crs_list)
+    most_common_crs_str, _ = crs_counter.most_common(1)[0]
+    DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
+
     # If conf_layer_links AND mode == 'flood' compile and load layers to use in filtering
     if conf_layer_links and mode == "flood":
         conf_DS = load_datasets(conf_layer_links)
+
+        # Identify and sort conf_DS by most common CRS (UTM zone) for reprojection
+        crs_list = [str(ds.rio.crs) for ds in conf_DS]
+        crs_counter = Counter(crs_list)
+        most_common_crs_str, _ = crs_counter.most_common(1)[0]
+        conf_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
         return DS, conf_DS
 
     # If conf_layer_links AND date_layer_links AND mode == 'fire' or mode == 'landslide' compile and load layers to use in filtering
@@ -386,6 +406,18 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
     ):
         conf_DS = load_datasets(conf_layer_links)
         date_DS = load_datasets(date_layer_links)
+
+        # Identify and sort conf_DS by most common CRS (UTM zone) for reprojection
+        crs_list = [str(ds.rio.crs) for ds in conf_DS]
+        crs_counter = Counter(crs_list)
+        most_common_crs_str, _ = crs_counter.most_common(1)[0]
+        conf_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
+
+        # Identify and sort date_DS by most common CRS (UTM zone) for reprojection
+        crs_list = [str(ds.rio.crs) for ds in date_DS]
+        crs_counter = Counter(crs_list)
+        most_common_crs_str, _ = crs_counter.most_common(1)[0]
+        date_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
         return DS, date_DS, conf_DS
     else:
         return DS
@@ -743,10 +775,16 @@ def generate_products(
     reclassify_snow_ice=False,
 ):
     """
+<<<<<<< HEAD
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode.
     The logic is updated to generate a separate mosaic for each unique UTM zone present
     in the intersecting granules for a given date, ensuring high-fidelity data processing.
 
+=======
+    Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
+    Granules are reprojected to the most common UTM zone present in the data for a given date.
+    
+>>>>>>> Update to use most common UTM
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
@@ -777,7 +815,17 @@ def generate_products(
     # Create layouts directory
     layouts_dir = mode_dir / "layouts"
     make_output_dir(layouts_dir)
+<<<<<<< HEAD
 
+=======
+    
+    # Define the resampling method.
+    if mode == "landslide":
+        resampling_method = Resampling.bilinear
+    else:
+        resampling_method = Resampling.nearest
+    
+>>>>>>> Update to use most common UTM
     if mode == "flood":
         short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
         layer_names = ["WTR", "BWTR"]
@@ -897,6 +945,7 @@ def generate_products(
                             )
                         else:
                             print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
+<<<<<<< HEAD
                         DS, date_DS, conf_DS = compile_and_load_data(
                             urls,
                             mode,
@@ -904,6 +953,11 @@ def generate_products(
                             date_layer_links=date_layer_links,
                         )
 
+=======
+                        DS, date_DS, conf_DS = compile_and_load_data(urls, mode, 
+                                                                        conf_layer_links=conf_layer_links,
+                                                                        date_layer_links=date_layer_links)
+>>>>>>> Update to use most common UTM
                         if filter_date:
                             date_threshold = compute_date_threshold(filter_date)
                             layout_date = str(filter_date)
@@ -932,10 +986,27 @@ def generate_products(
                         conf_DS = None
                     else:
                         print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
+                        DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
 
+                # Since compile_and_load_data sorts by frequency, DS[0] has the "most common" CRS.
+                target_crs_proj4 = DS[0].rio.crs.to_proj4()
+                print(f"[INFO] Master CRS determined from most common granule: {target_crs_proj4}")
+
+<<<<<<< HEAD
                     DS, conf_DS = compile_and_load_data(
                         urls, mode, conf_layer_links=conf_layer_links
                     )
+=======
+                # Detect if the CRS is geographic to set the correct resolution
+                crs_obj = CRS.from_proj4(target_crs_proj4)
+                if crs_obj.is_geographic:
+                    target_res = 0.0002695 # ~30m in degrees
+                else:
+                    target_res = 30 # 30m in projected units
+
+                # Define the master grid properties
+                master_grid = get_master_grid_props(bbox, target_crs_proj4, target_res=target_res)
+>>>>>>> Update to use most common UTM
 
                 # Group loaded DataArrays by CRS (UTM Zone)
                 crs_groups = defaultdict(list)
@@ -983,19 +1054,16 @@ def generate_products(
                             continue
                         crs_groups[crs_str].append(da_data)
 
-                # These lists will hold the warped, *in-memory* xarray objects
-                warped_ds_group = []
-                warped_conf_group = []
-                warped_date_group = []
-                colormap = None # Grab colormap during filtering
+                # These lists will hold the in-memory warped xarray objects
+                all_warped_ds = []
+                colormap = None # Grab colormap during filtering for use in final mosaic
 
-                # Iterate through each CRS group to process and mosaic
+                # Iterate through each CRS group to process, then warp to the master grid
                 for crs_str, ds_group in crs_groups.items():
-
                     print(f"[INFO] Processing and Warping {len(ds_group)} granules from {crs_str}...")
-
                     current_conf_DS = conf_groups.get(crs_str)
                     current_date_DS = date_groups.get(crs_str)
+<<<<<<< HEAD
 
                     colormap = None  # Initialize colormap
 
@@ -1020,6 +1088,15 @@ def generate_products(
                             and layer in ["BWTR", "WTR"]
                         ):
                             # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
+=======
+
+                    # Filtering/Reclassification (Per CRS Group)
+                    if mode == "fire" or (mode == "landslide" and short_name.startswith('OPERA_L3_DIST')):
+                        ds_group, colormap = filter_by_date_and_confidence(ds_group, current_date_DS, date_threshold, DS_conf=current_conf_DS, confidence_threshold=0, fill_value=None)
+                    
+                    elif mode == "flood":
+                        if reclassify_snow_ice == True and short_name == "OPERA_L3_DSWX-HLS_V1" and layer in ["BWTR", "WTR"]:
+>>>>>>> Update to use most common UTM
                             if current_conf_DS is None:
                                 print(
                                     f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}"
@@ -1045,55 +1122,21 @@ def generate_products(
                     # Reproject the processed granules to the master grid
                     print(f"[INFO] Warping {len(ds_group)} main granules to master grid...")
                     for da in ds_group:
-                        # Make a copy to not modify the original dict
                         grid_props = master_grid.copy()
-                        # Pop the positional argument
                         dst_crs_val = grid_props.pop("dst_crs")
-                        
                         da_warped = da.rio.reproject(
-                            dst_crs_val, # Pass positionally
-                            **grid_props, # Unpack the rest (shape, transform)
+                            dst_crs_val,
+                            **grid_props,
                             resampling=resampling_method
                         )
-                        warped_ds_group.append(da_warped)
-
-                    # Warp the auxiliary layers too, using 'nearest'
-                    if current_conf_DS:
-                        print(f"[INFO] Warping {len(current_conf_DS)} CONF granules to master grid...")
-                        for da in current_conf_DS:
-                            # Make a copy to not modify the original dict
-                            grid_props = master_grid.copy()
-                            # Pop the positional argument
-                            dst_crs_val = grid_props.pop("dst_crs")
-                            
-                            da_warped = da.rio.reproject(
-                                dst_crs_val,
-                                **grid_props,
-                                resampling=Resampling.nearest
-                            )
-                            warped_conf_group.append(da_warped)
-
-                    if current_date_DS:
-                        print(f"[INFO] Warping {len(current_date_DS)} DATE granules to master grid...")
-                        for da in current_date_DS:
-                            # Make a copy to not modify the original dict
-                            grid_props = master_grid.copy()
-                            # Pop the positional argument
-                            dst_crs_val = grid_props.pop("dst_crs")
-                            
-                            da_warped = da.rio.reproject(
-                                dst_crs_val,
-                                **grid_props,
-                                resampling=Resampling.nearest
-                            )
-                            warped_date_group.append(da_warped)
+                        all_warped_ds.append(da_warped)
                 
                 # Mosaic the warped granules
-                if not warped_ds_group:
+                if not all_warped_ds:
                     print(f"[WARN] No valid granules to mosaic for {short_name} - {layer} on {date}. Skipping.")
                     continue
                     
-                print(f"[INFO] Mosaicking {len(warped_ds_group)} total warped granules for {date}...")
+                print(f"[INFO] Mosaicking {len(all_warped_ds)} total warped granules for {date}...")
 
                 # Use pre-determined colormap or make another attempt to get it. If still None, proceed without it.
                 if colormap is None:
@@ -1103,7 +1146,7 @@ def generate_products(
                         colormap = None
                     
                 # Mosaic the datasets using the appropriate method/rule
-                mosaic, _, nodata = opera_mosaic.mosaic_opera(warped_ds_group, product=short_name, merge_args={})
+                mosaic, _, nodata = opera_mosaic.mosaic_opera(all_warped_ds, product=short_name, merge_args={})
                 image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata)
 
                 # Create filename and full paths
@@ -1124,6 +1167,7 @@ def generate_products(
                     "crs": mosaic_crs,
                 }
                 # Make a map with PyGMT
+<<<<<<< HEAD
                 map_name = make_map(
                     maps_dir,
                     mosaic_path,
@@ -1148,6 +1192,13 @@ def generate_products(
                     reclassify_snow_ice,
                     utm_suffix=utm_suffix,
                 )
+=======
+                map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox, is_difference=False)
+
+                # Make a PDF layout
+                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice)
+
+>>>>>>> Update to use most common UTM
 
     # Pair-wise differencing for 'flood' mode
     if mode == "flood":
@@ -1177,7 +1228,6 @@ def generate_products(
                                 "layer": layer_k,
                                 "date_earlier": d_early,
                                 "date_later": d_later,
-                                "utm_suffix": "N/A",
                                 "crs_earlier": crs_a,
                                 "crs_later": crs_b,
                                 "reason": "Mosaics have different master CRS (this should not happen)"
@@ -1200,12 +1250,12 @@ def generate_products(
                             
                             # Make a map with PyGMT
                             diff_date_str = f"{d_later}_{d_early}"
-                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True, utm_suffix="")
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
 
                             # Make a PDF layout
                             if map_name:
                                 diff_date_str_layout = f"{d_early}, {d_later}"
-                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice, utm_suffix="")
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
                         
                         except Exception as e:
                             skipped.append({
@@ -1213,7 +1263,6 @@ def generate_products(
                                 "layer": layer_k,
                                 "date_earlier": d_early,
                                 "date_later": d_later,
-                                "utm_suffix": "N/A",
                                 "error": str(e),
                                 "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
                             })
@@ -1259,7 +1308,6 @@ def generate_products(
                                 "layer": layer_k,
                                 "date_earlier": d_early,
                                 "date_later": d_later,
-                                "utm_suffix": "N/A",
                                 "crs_earlier": crs_a,
                                 "crs_later": crs_b,
                                 "reason": "Mosaics have different master CRS (this should not happen)"
@@ -1282,12 +1330,12 @@ def generate_products(
                             
                             # Make a map with PyGMT
                             diff_date_str = f"{d_later}_{d_early}"
-                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True, utm_suffix="")
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
 
                             # Make a PDF layout
                             if map_name:
                                 diff_date_str_layout = f"{d_early}, {d_later}"
-                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice, utm_suffix="")
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
 
                         except Exception as e:
                             skipped.append({
@@ -1295,7 +1343,6 @@ def generate_products(
                                 "layer": layer_k,
                                 "date_earlier": d_early,
                                 "date_later": d_later,
-                                "utm_suffix": "N/A",
                                 "error": str(e),
                                 "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
                             })
@@ -1371,6 +1418,7 @@ def expand_region_to_aspect(region, target_aspect):
 
     return [xmin, xmax, ymin, ymax]
 
+<<<<<<< HEAD
 
 def make_map(
     maps_dir,
@@ -1383,6 +1431,9 @@ def make_map(
     is_difference=False,
     utm_suffix="",
 ):
+=======
+def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=None, is_difference=False):
+>>>>>>> Update to use most common UTM
     """
     Create a map using PyGMT from the provided mosaic path.
 
@@ -1395,8 +1446,6 @@ def make_map(
         bbox (list): Bounding box in the form [South, North, West, East].
         zoom_bbox (list, optional): Bounding box for the zoom-in inset map, in the form [South, North, West, East].
         is_difference (bool, optional): Flag to indicate if the mosaic is a difference product. Defaults to False.
-        utm_suffix (str, optional): UTM zone suffix (e.g., '_18N') for unique naming. Defaults to "".
-
     Returns:
         map_name (Path): Path to the saved map image.
     Raises:
@@ -1406,11 +1455,14 @@ def make_map(
     import os
     import re
 
+<<<<<<< HEAD
     import pygmt
     import rioxarray
     from pygmt.params import Box
     from pyproj import Geod
 
+=======
+>>>>>>> Update to use most common UTM
     # Check whether the product is a difference product
     if is_difference:
         match = re.search(
@@ -1427,7 +1479,11 @@ def make_map(
         date_str = date
 
     # Create a temporary path for the WGS84 reprojected file
+<<<<<<< HEAD
     mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", f"_WGS84_TMP{utm_suffix}.tif"))
+=======
+    mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", "_WGS84_TMP.tif"))
+>>>>>>> Update to use most common UTM
 
     def cleanup_temp_file(filepath):
         """Helper to safely remove the temporary file."""
@@ -1449,7 +1505,12 @@ def make_map(
 
         # Load mosaic from the temporary file
         grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
+<<<<<<< HEAD
 
+=======
+        bounds = grd.rio.bounds()
+        
+>>>>>>> Update to use most common UTM
         try:
             nodata_value = grd.rio.nodata
         except AttributeError:
@@ -1494,11 +1555,17 @@ def make_map(
         if is_difference:
             data_values = grd.values[~np.isnan(grd.values)]
             if len(data_values) == 0:
+<<<<<<< HEAD
                 print(
                     f"[WARN] Difference product {mosaic_path} has no valid data after nodata removal. Skipping map generation."
                 )
                 cleanup_temp_file(mosaic_wgs84)  # Cleanup on exit point
                 return None  # Skip map generation
+=======
+                print(f"[WARN] Difference product {mosaic_path} has no valid data after nodata removal. Skipping map generation.")
+                cleanup_temp_file(mosaic_wgs84)
+                return None
+>>>>>>> Update to use most common UTM
 
             # Calculate the 2nd and 98th percentiles
             p2, p98 = np.percentile(data_values, [2, 98])
@@ -1829,9 +1896,13 @@ def make_map(
             )
 
         # Export map
-        map_name = maps_dir / f"{short_name}_{layer}_{date}{utm_suffix}_map.png"
+        map_name = maps_dir / f"{short_name}_{layer}_{date}_map.png"
         fig.savefig(map_name, dpi=900)
+<<<<<<< HEAD
         cleanup_temp_file(mosaic_wgs84)
+=======
+        #cleanup_temp_file(mosaic_wgs84) 
+>>>>>>> Update to use most common UTM
 
         return map_name
 
@@ -1840,6 +1911,7 @@ def make_map(
         print(f"[ERROR] An error occurred during map generation for {mosaic_path}: {e}")
         raise
 
+<<<<<<< HEAD
 
 def make_layout(
     layout_dir,
@@ -1852,6 +1924,9 @@ def make_layout(
     reclassify_snow_ice=False,
     utm_suffix="",
 ):
+=======
+def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice=False):
+>>>>>>> Update to use most common UTM
     """
     Create a layout using matplotlib for the provided map.
     Args:
@@ -2151,7 +2226,7 @@ def make_layout(
     plt.tight_layout()
 
     # layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
-    layout_name = layout_dir / f"{short_name}_{layer}_{date}{utm_suffix}_layout.pdf"
+    layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
     return
 
