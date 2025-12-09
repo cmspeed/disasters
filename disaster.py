@@ -297,18 +297,11 @@ def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
 
 def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
     """
-<<<<<<< HEAD
-    Compile and load data from the provided layer links for mosaicking. This modified version
-    loads all datasets regardless of their CRS, but filters to the most common Sentinel-1
-    unit (S1A or S1C) if applicable.
-
-=======
     Compile and load data from the provided layer links for mosaicking. If granules span muliple UTM zones, 
     granules with the less common UTM are reprojected to the most common UTM prior to mosaicking. 
     If there are S1A and S1C-derived OPERA products over the same area on the same day, only the most common
     (S1A or S1C) is used in the mosaicking.
     
->>>>>>> Update to use most common UTM
     Args:
         data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
@@ -775,16 +768,9 @@ def generate_products(
     reclassify_snow_ice=False,
 ):
     """
-<<<<<<< HEAD
-    Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode.
-    The logic is updated to generate a separate mosaic for each unique UTM zone present
-    in the intersecting granules for a given date, ensuring high-fidelity data processing.
-
-=======
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     Granules are reprojected to the most common UTM zone present in the data for a given date.
     
->>>>>>> Update to use most common UTM
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
@@ -815,9 +801,6 @@ def generate_products(
     # Create layouts directory
     layouts_dir = mode_dir / "layouts"
     make_output_dir(layouts_dir)
-<<<<<<< HEAD
-
-=======
     
     # Define the resampling method.
     if mode == "landslide":
@@ -825,7 +808,6 @@ def generate_products(
     else:
         resampling_method = Resampling.nearest
     
->>>>>>> Update to use most common UTM
     if mode == "flood":
         short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
         layer_names = ["WTR", "BWTR"]
@@ -945,7 +927,6 @@ def generate_products(
                             )
                         else:
                             print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
-<<<<<<< HEAD
                         DS, date_DS, conf_DS = compile_and_load_data(
                             urls,
                             mode,
@@ -953,11 +934,6 @@ def generate_products(
                             date_layer_links=date_layer_links,
                         )
 
-=======
-                        DS, date_DS, conf_DS = compile_and_load_data(urls, mode, 
-                                                                        conf_layer_links=conf_layer_links,
-                                                                        date_layer_links=date_layer_links)
->>>>>>> Update to use most common UTM
                         if filter_date:
                             date_threshold = compute_date_threshold(filter_date)
                             layout_date = str(filter_date)
@@ -992,11 +968,6 @@ def generate_products(
                 target_crs_proj4 = DS[0].rio.crs.to_proj4()
                 print(f"[INFO] Master CRS determined from most common granule: {target_crs_proj4}")
 
-<<<<<<< HEAD
-                    DS, conf_DS = compile_and_load_data(
-                        urls, mode, conf_layer_links=conf_layer_links
-                    )
-=======
                 # Detect if the CRS is geographic to set the correct resolution
                 crs_obj = CRS.from_proj4(target_crs_proj4)
                 if crs_obj.is_geographic:
@@ -1006,7 +977,6 @@ def generate_products(
 
                 # Define the master grid properties
                 master_grid = get_master_grid_props(bbox, target_crs_proj4, target_res=target_res)
->>>>>>> Update to use most common UTM
 
                 # Group loaded DataArrays by CRS (UTM Zone)
                 crs_groups = defaultdict(list)
@@ -1063,7 +1033,6 @@ def generate_products(
                     print(f"[INFO] Processing and Warping {len(ds_group)} granules from {crs_str}...")
                     current_conf_DS = conf_groups.get(crs_str)
                     current_date_DS = date_groups.get(crs_str)
-<<<<<<< HEAD
 
                     colormap = None  # Initialize colormap
 
@@ -1088,15 +1057,6 @@ def generate_products(
                             and layer in ["BWTR", "WTR"]
                         ):
                             # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
-=======
-
-                    # Filtering/Reclassification (Per CRS Group)
-                    if mode == "fire" or (mode == "landslide" and short_name.startswith('OPERA_L3_DIST')):
-                        ds_group, colormap = filter_by_date_and_confidence(ds_group, current_date_DS, date_threshold, DS_conf=current_conf_DS, confidence_threshold=0, fill_value=None)
-                    
-                    elif mode == "flood":
-                        if reclassify_snow_ice == True and short_name == "OPERA_L3_DSWX-HLS_V1" and layer in ["BWTR", "WTR"]:
->>>>>>> Update to use most common UTM
                             if current_conf_DS is None:
                                 print(
                                     f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}"
@@ -1167,7 +1127,6 @@ def generate_products(
                     "crs": mosaic_crs,
                 }
                 # Make a map with PyGMT
-<<<<<<< HEAD
                 map_name = make_map(
                     maps_dir,
                     mosaic_path,
@@ -1192,13 +1151,6 @@ def generate_products(
                     reclassify_snow_ice,
                     utm_suffix=utm_suffix,
                 )
-=======
-                map_name = make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox, is_difference=False)
-
-                # Make a PDF layout
-                make_layout(layouts_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice)
-
->>>>>>> Update to use most common UTM
 
     # Pair-wise differencing for 'flood' mode
     if mode == "flood":
@@ -1418,7 +1370,6 @@ def expand_region_to_aspect(region, target_aspect):
 
     return [xmin, xmax, ymin, ymax]
 
-<<<<<<< HEAD
 
 def make_map(
     maps_dir,
@@ -1431,9 +1382,6 @@ def make_map(
     is_difference=False,
     utm_suffix="",
 ):
-=======
-def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=None, is_difference=False):
->>>>>>> Update to use most common UTM
     """
     Create a map using PyGMT from the provided mosaic path.
 
@@ -1455,14 +1403,11 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
     import os
     import re
 
-<<<<<<< HEAD
     import pygmt
     import rioxarray
     from pygmt.params import Box
     from pyproj import Geod
 
-=======
->>>>>>> Update to use most common UTM
     # Check whether the product is a difference product
     if is_difference:
         match = re.search(
@@ -1479,11 +1424,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
         date_str = date
 
     # Create a temporary path for the WGS84 reprojected file
-<<<<<<< HEAD
-    mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", f"_WGS84_TMP{utm_suffix}.tif"))
-=======
     mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", "_WGS84_TMP.tif"))
->>>>>>> Update to use most common UTM
 
     def cleanup_temp_file(filepath):
         """Helper to safely remove the temporary file."""
@@ -1503,14 +1444,14 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
             creationOptions=["COMPRESS=DEFLATE"],
         )
 
+        # write to geotiff for reveiew
+        save_gtiff_as_cog(mosaic_wgs84)
+        
         # Load mosaic from the temporary file
         grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
-<<<<<<< HEAD
 
-=======
         bounds = grd.rio.bounds()
         
->>>>>>> Update to use most common UTM
         try:
             nodata_value = grd.rio.nodata
         except AttributeError:
@@ -1555,17 +1496,11 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
         if is_difference:
             data_values = grd.values[~np.isnan(grd.values)]
             if len(data_values) == 0:
-<<<<<<< HEAD
                 print(
                     f"[WARN] Difference product {mosaic_path} has no valid data after nodata removal. Skipping map generation."
                 )
                 cleanup_temp_file(mosaic_wgs84)  # Cleanup on exit point
                 return None  # Skip map generation
-=======
-                print(f"[WARN] Difference product {mosaic_path} has no valid data after nodata removal. Skipping map generation.")
-                cleanup_temp_file(mosaic_wgs84)
-                return None
->>>>>>> Update to use most common UTM
 
             # Calculate the 2nd and 98th percentiles
             p2, p98 = np.percentile(data_values, [2, 98])
@@ -1898,11 +1833,7 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
         # Export map
         map_name = maps_dir / f"{short_name}_{layer}_{date}_map.png"
         fig.savefig(map_name, dpi=900)
-<<<<<<< HEAD
         cleanup_temp_file(mosaic_wgs84)
-=======
-        #cleanup_temp_file(mosaic_wgs84) 
->>>>>>> Update to use most common UTM
 
         return map_name
 
@@ -1911,7 +1842,6 @@ def make_map(maps_dir, mosaic_path, short_name, layer, date, bbox, zoom_bbox=Non
         print(f"[ERROR] An error occurred during map generation for {mosaic_path}: {e}")
         raise
 
-<<<<<<< HEAD
 
 def make_layout(
     layout_dir,
@@ -1924,9 +1854,6 @@ def make_layout(
     reclassify_snow_ice=False,
     utm_suffix="",
 ):
-=======
-def make_layout(layout_dir, map_name, short_name, layer, date, layout_date, layout_title, reclassify_snow_ice=False):
->>>>>>> Update to use most common UTM
     """
     Create a layout using matplotlib for the provided map.
     Args:
