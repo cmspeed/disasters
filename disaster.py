@@ -1169,8 +1169,10 @@ def generate_products(
 
                 # Convert to COG (writes back into mosaic_path)
                 save_gtiff_as_cog(tmp_path, mosaic_path)
-
                 print(f"[INFO] Mosaic written as COG: {mosaic_path}")
+
+                # Remove temporary file
+                cleanup_temp_file(tmp_path)  # Cleanup on exit point
 
                 mosaic_index[short_name][layer][str(date)] = {
                     "path": mosaic_path,
@@ -1473,14 +1475,6 @@ def make_map(
 
     # Create a temporary path for the WGS84 reprojected file
     mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", "_WGS84_TMP.tif"))
-
-    def cleanup_temp_file(filepath):
-        """Helper to safely remove the temporary file."""
-        if filepath.exists():
-            try:
-                os.remove(filepath)
-            except Exception as e:
-                print(f"[WARN] Failed to clean up temporary WGS84 file {filepath}: {e}")
 
     try:
         # Reproject to WGS84 (into the temp file)
@@ -2200,6 +2194,15 @@ def make_layout(
     layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
     return
+
+
+def cleanup_temp_file(filepath):
+    """Helper to safely remove the temporary file."""
+    if filepath.exists():
+        try:
+            os.remove(filepath)
+        except Exception as e:
+            print(f"[WARN] Failed to clean up temporary WGS84 file {filepath}: {e}")
 
 
 def save_gtiff_as_cog(src_path: Path, dst_path: Path | None = None):
