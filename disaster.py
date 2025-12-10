@@ -241,6 +241,85 @@ def read_opera_metadata_csv(output_dir):
     return df
 
 
+def get_master_crs(df_opera, mode):
+    """
+    Scans all relevant product URLs in the DataFrame to find the most common UTM CRS.
+    This defines the single global master grid for the entire time series.
+    """
+    from collections import Counter
+    from opera_utils.disp._remote import open_file
+    import rioxarray
+
+    print("[INFO] Scanning all granules to determine Global Master CRS...")
+
+    # Authenticate
+    username, password = authenticate()
+
+    # Collect all unique URLs relevant to the mode
+    all_urls = []
+    
+    # Define columns to check based on mode
+    if mode == "flood":
+        cols = ["Download URL WTR", "Download URL BWTR"]
+    elif mode == "fire":
+        cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS"]
+    elif mode == "landslide":
+        cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS", "Download URL RTC-VV", "Download URL RTC-VH"]
+    else:
+        return None
+
+    for col in cols:
+        if col in df_opera.columns:
+            all_urls.extend(df_opera[col].dropna().tolist())
+
+    # Remove duplicates
+    all_urls = list(set(all_urls))
+    
+    # Filter for S1A vs S1C if both exist (keep most common platform)
+    satellite_counts = Counter()
+    for link in all_urls:
+        if 'S1A' in link: satellite_counts['S1A'] += 1
+        elif 'S1C' in link: satellite_counts['S1C'] += 1
+    
+    if satellite_counts:
+        most_common_sat, _ = satellite_counts.most_common(1)[0]
+        all_urls = [u for u in all_urls if most_common_sat in u]
+
+    crs_counter = Counter()
+
+    # Open files to check CRS (metadata read only). Sample only first 50.
+    sample_size = min(len(all_urls), 50) 
+    
+    print(f"[INFO] Checking CRS of {sample_size} representative granules...")
+    
+    for i, url in enumerate(all_urls[:sample_size]):
+        try:
+            # Try direct open (local/s3)
+            with rioxarray.open_rasterio(url, masked=False) as ds:
+                crs_counter[str(ds.rio.crs)] += 1
+        except Exception:
+            try:
+                # Try via earthaccess/opera_utils
+                f = open_file(url, earthdata_username=username, earthdata_password=password)
+                with rioxarray.open_rasterio(f, masked=False) as ds:
+                    crs_counter[str(ds.rio.crs)] += 1
+            except Exception:
+                continue
+                
+    if not crs_counter:
+        raise RuntimeError("Could not determine CRS from any granules.")
+
+    # Get the winner
+    most_common_crs_str, count = crs_counter.most_common(1)[0]
+    
+    # Convert to PROJ4 string for consistency
+    from pyproj import CRS
+    proj4_str = CRS.from_string(most_common_crs_str).to_proj4()
+
+    print(f"[INFO] Global Master CRS determined: {proj4_str} (found in {count}/{sample_size} granules)")
+    return proj4_str
+
+
 def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
     """
     Defines a master pixel-aligned grid based on a lat/lon BBOX and target CRS.
@@ -297,8 +376,7 @@ def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
 
 def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
     """
-    Compile and load data from the provided layer links for mosaicking. If granules span muliple UTM zones, 
-    granules with the less common UTM are reprojected to the most common UTM prior to mosaicking. 
+    Compile and load data from the provided layer links for mosaicking.
     If there are S1A and S1C-derived OPERA products over the same area on the same day, only the most common
     (S1A or S1C) is used in the mosaicking.
     
@@ -348,13 +426,9 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
 
         # Filter auxiliary links consistently if they exist
         if conf_layer_links:
-            conf_layer_links = [
-                link for i, link in enumerate(conf_layer_links) if is_most_common[i]
-            ]
+            conf_layer_links = [link for i, link in enumerate(conf_layer_links) if is_most_common[i]]
         if date_layer_links:
-            date_layer_links = [
-                link for i, link in enumerate(date_layer_links) if is_most_common[i]
-            ]
+            date_layer_links = [link for i, link in enumerate(date_layer_links) if is_most_common[i]]
 
     # Helper to load datasets
     def load_datasets(links):
@@ -374,21 +448,9 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
     # Load the primary data layer (DS)
     DS = load_datasets(data_layer_links)
 
-    # Identify and sort DS by most common CRS (UTM zone) for reprojection
-    crs_list = [str(ds.rio.crs) for ds in DS]
-    crs_counter = Counter(crs_list)
-    most_common_crs_str, _ = crs_counter.most_common(1)[0]
-    DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
-
     # If conf_layer_links AND mode == 'flood' compile and load layers to use in filtering
     if conf_layer_links and mode == "flood":
         conf_DS = load_datasets(conf_layer_links)
-
-        # Identify and sort conf_DS by most common CRS (UTM zone) for reprojection
-        crs_list = [str(ds.rio.crs) for ds in conf_DS]
-        crs_counter = Counter(crs_list)
-        most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        conf_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
         return DS, conf_DS
 
     # If conf_layer_links AND date_layer_links AND mode == 'fire' or mode == 'landslide' compile and load layers to use in filtering
@@ -399,18 +461,6 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
     ):
         conf_DS = load_datasets(conf_layer_links)
         date_DS = load_datasets(date_layer_links)
-
-        # Identify and sort conf_DS by most common CRS (UTM zone) for reprojection
-        crs_list = [str(ds.rio.crs) for ds in conf_DS]
-        crs_counter = Counter(crs_list)
-        most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        conf_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
-
-        # Identify and sort date_DS by most common CRS (UTM zone) for reprojection
-        crs_list = [str(ds.rio.crs) for ds in date_DS]
-        crs_counter = Counter(crs_list)
-        most_common_crs_str, _ = crs_counter.most_common(1)[0]
-        date_DS.sort(key=lambda ds: 0 if str(ds.rio.crs) == most_common_crs_str else 1)
         return DS, date_DS, conf_DS
     else:
         return DS
@@ -785,10 +835,10 @@ def generate_products(
     """
     import re
     from collections import defaultdict
-
     from rasterio.shutil import copy
-
     import opera_mosaic
+    from pyproj import CRS
+    from rasterio.enums import Resampling
 
     # Create data directory
     data_dir = mode_dir / "data"
@@ -801,6 +851,19 @@ def generate_products(
     # Create layouts directory
     layouts_dir = mode_dir / "layouts"
     make_output_dir(layouts_dir)
+
+    # Determine most common UTM CRS to warp all granules to across all dates
+    target_crs_proj4 = get_master_crs(df_opera, mode)
+
+    # Detect if the CRS is geographic to set the correct resolution
+    crs_obj = CRS.from_proj4(target_crs_proj4)
+    if crs_obj.is_geographic:
+        target_res = 0.0002695 # ~30m in degrees
+    else:
+        target_res = 30 # 30m in projected units
+
+    # Define the master grid properties
+    master_grid = get_master_grid_props(bbox, target_crs_proj4, target_res=target_res)
     
     # Define the resampling method.
     if mode == "landslide":
@@ -808,9 +871,12 @@ def generate_products(
     else:
         resampling_method = Resampling.nearest
     
+    # Define short names and layer names based on mode
     if mode == "flood":
-        short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
-        layer_names = ["WTR", "BWTR"]
+        #short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+        short_names = ["OPERA_L3_DSWX-S1_V1"]
+        #layer_names = ["WTR", "BWTR"]
+        layer_names = ["WTR"]
     elif mode == "fire":
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
         layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
@@ -963,20 +1029,6 @@ def generate_products(
                     else:
                         print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
                         DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
-
-                # Since compile_and_load_data sorts by frequency, DS[0] has the "most common" CRS.
-                target_crs_proj4 = DS[0].rio.crs.to_proj4()
-                print(f"[INFO] Master CRS determined from most common granule: {target_crs_proj4}")
-
-                # Detect if the CRS is geographic to set the correct resolution
-                crs_obj = CRS.from_proj4(target_crs_proj4)
-                if crs_obj.is_geographic:
-                    target_res = 0.0002695 # ~30m in degrees
-                else:
-                    target_res = 30 # 30m in projected units
-
-                # Define the master grid properties
-                master_grid = get_master_grid_props(bbox, target_crs_proj4, target_res=target_res)
 
                 # Group loaded DataArrays by CRS (UTM Zone)
                 crs_groups = defaultdict(list)
@@ -1444,9 +1496,6 @@ def make_map(
             creationOptions=["COMPRESS=DEFLATE"],
         )
 
-        # write to geotiff for reveiew
-        save_gtiff_as_cog(mosaic_wgs84)
-        
         # Load mosaic from the temporary file
         grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
 
@@ -1833,7 +1882,7 @@ def make_map(
         # Export map
         map_name = maps_dir / f"{short_name}_{layer}_{date}_map.png"
         fig.savefig(map_name, dpi=900)
-        cleanup_temp_file(mosaic_wgs84)
+        cleanup_temp_file(mosaic_wgs84) 
 
         return map_name
 
