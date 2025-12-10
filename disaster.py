@@ -873,10 +873,8 @@ def generate_products(
     
     # Define short names and layer names based on mode
     if mode == "flood":
-        #short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
-        short_names = ["OPERA_L3_DSWX-S1_V1"]
-        #layer_names = ["WTR", "BWTR"]
-        layer_names = ["WTR"]
+        short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+        layer_names = ["WTR", "BWTR"]
     elif mode == "fire":
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
         layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
@@ -1115,7 +1113,7 @@ def generate_products(
                                 )
                             else:
                                 print(
-                                    f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers for CRS {utm_suffix}"
+                                    f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers"
                                 )
                                 ds_group, colormap = reclassify_snow_ice_as_water(
                                     ds_group, current_conf_DS
@@ -1174,10 +1172,11 @@ def generate_products(
 
                 print(f"[INFO] Mosaic written as COG: {mosaic_path}")
 
-                mosaic_index[short_name][layer][str(date)][utm_suffix] = {
+                mosaic_index[short_name][layer][str(date)] = {
                     "path": mosaic_path,
-                    "crs": mosaic_crs,
+                    "crs": master_grid["dst_crs"] # Store the master CRS string
                 }
+
                 # Make a map with PyGMT
                 map_name = make_map(
                     maps_dir,
@@ -1187,8 +1186,7 @@ def generate_products(
                     date,
                     bbox,
                     zoom_bbox,
-                    is_difference=False,
-                    utm_suffix=utm_suffix,
+                    is_difference=False
                 )
 
                 # Make a PDF layout
@@ -1200,8 +1198,7 @@ def generate_products(
                     date,
                     layout_date,
                     layout_title,
-                    reclassify_snow_ice,
-                    utm_suffix=utm_suffix,
+                    reclassify_snow_ice
                 )
 
     # Pair-wise differencing for 'flood' mode
@@ -1431,8 +1428,7 @@ def make_map(
     date,
     bbox,
     zoom_bbox=None,
-    is_difference=False,
-    utm_suffix="",
+    is_difference=False
 ):
     """
     Create a map using PyGMT from the provided mosaic path.
@@ -1900,8 +1896,7 @@ def make_layout(
     date,
     layout_date,
     layout_title,
-    reclassify_snow_ice=False,
-    utm_suffix="",
+    reclassify_snow_ice=False
 ):
     """
     Create a layout using matplotlib for the provided map.
