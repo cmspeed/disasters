@@ -69,6 +69,11 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "-ld", "--local_dir", type=Path, required=False, default=None,
+        help="Path to a local directory containing pre-downloaded OPERA geotiffs. If provided, cloud search is skipped."
+    )
+
+    parser.add_argument(
         "-sn",
         "--short_name",
         type=str,
@@ -182,6 +187,113 @@ def authenticate():
     auths = netrc.netrc(netrc_file)
     username, _, password = auths.authenticators("urs.earthdata.nasa.gov")
     return username, password
+
+
+def scan_local_directory(local_dir: Path):
+    """
+    Scans a local directory for OPERA Geotiffs, parses their filenames, 
+    and constructs a DataFrame mimicking the structure of 'opera_products_metadata.csv'.
+    """
+    import re
+    
+    tif_files = list(local_dir.rglob("*.tif"))
+    if not tif_files:
+        raise FileNotFoundError(f"No .tif files found in {local_dir}")
+
+    print(f"[INFO] Scanning {len(tif_files)} local files in {local_dir}...")
+
+    # Dictionary to hold grouped granule data
+    granules = defaultdict(dict)
+    
+    # Map filename prefixes to the official Dataset IDs used in the rest of the script.
+    product_map = {
+        "OPERA_L3_DSWX-HLS": "OPERA_L3_DSWX-HLS_V1",
+        "OPERA_L3_DSWx-HLS": "OPERA_L3_DSWX-HLS_V1",
+        "OPERA_L3_DSWX-S1": "OPERA_L3_DSWX-S1_V1",
+        "OPERA_L3_DSWx-S1": "OPERA_L3_DSWX-S1_V1",
+        "OPERA_L3_DIST-ALERT-HLS": "OPERA_L3_DIST-ALERT-HLS_V1",
+        "OPERA_L3_DIST-ALERT-S1": "OPERA_L3_DIST-ALERT-S1_V1",
+        "OPERA_L2_RTC-S1": "OPERA_L2_RTC-S1_V1",
+    }
+
+    for f in tif_files:
+        name = f.name
+        
+        # 1. Identify Product Type
+        prod_key = None
+        for key in product_map.keys():
+            if name.startswith(key):
+                prod_key = key
+                break
+        
+        if not prod_key:
+            continue
+            
+        dataset_name = product_map[prod_key]
+
+        # 2. Extract Date and Tile ID
+        parts = name.split('_')
+        date_str = None
+        tile_id = "UNKNOWN"
+        
+        # Find the part that looks like a date (YYYYMMDDTHHMMSSZ)
+        # The Tile ID is almost always the part immediately preceding the date.
+        for i, part in enumerate(parts):
+            if re.match(r'\d{8}T\d{6}Z', part):
+                date_str = part
+                if i > 0:
+                    tile_id = parts[i-1]
+                break
+        
+        if not date_str:
+            continue
+
+        # 3. Extract Layer Suffix
+        layer_suffix = parts[-1].replace('.tif', '')
+        
+        if layer_suffix == "WTR" or layer_suffix.endswith("WTR"):
+            layer_col = "WTR"
+        elif layer_suffix == "BWTR" or layer_suffix.endswith("BWTR"):
+            layer_col = "BWTR"
+        elif layer_suffix == "CONF" or layer_suffix.endswith("CONF"):
+            layer_col = "CONF"
+        elif "VEG-DIST-STATUS" in name:
+            layer_col = "VEG-DIST-STATUS"
+        elif "VEG-ANOM-MAX" in name:
+            layer_col = "VEG-ANOM-MAX"
+        elif "VEG-DIST-DATE" in name:
+            layer_col = "VEG-DIST-DATE"
+        elif "VEG-DIST-CONF" in name:
+            layer_col = "VEG-DIST-CONF"
+        elif "VV" in layer_suffix:
+            layer_col = "RTC-VV"
+        elif "VH" in layer_suffix:
+            layer_col = "RTC-VH"
+        else:
+            layer_col = layer_suffix 
+
+        # 4. Group by (Dataset, Date, Tile_ID) to prevent overwriting different tiles with same timestamp
+        group_key = (dataset_name, date_str, tile_id) 
+        
+        granules[group_key][f"Download URL {layer_col}"] = str(f.absolute())
+        granules[group_key]["Start Time"] = date_str
+        granules[group_key]["Dataset"] = dataset_name
+
+    # Check if we found anything
+    if not granules:
+        print(f"[ERROR] Found {len(tif_files)} files but none matched expected patterns.")
+        return pd.DataFrame()
+
+    # Convert to DataFrame
+    rows = []
+    for key, data in granules.items():
+        rows.append(data)
+
+    df = pd.DataFrame(rows)
+    df['Start Time'] = pd.to_datetime(df['Start Time'], format='%Y%m%dT%H%M%SZ', errors='coerce')
+    
+    print(f"[INFO] Constructed local metadata DataFrame with {len(df)} granules.")
+    return df
 
 
 def make_output_dir(output_dir: Path):
@@ -399,8 +511,15 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
 
     logging.getLogger().setLevel(logging.ERROR)
 
-    # Authenticate to get username and password
-    username, password = authenticate()
+    # If the first link exists as a local path, assume all are local and skip auth.
+    is_local = False
+    if data_layer_links and Path(data_layer_links[0]).exists():
+        is_local = True
+        print("[INFO] Local files detected. Skipping Earthdata authentication.")
+        username, password = None, None
+    else:
+        # Authenticate to get username and password (only for cloud URLs)
+        username, password = authenticate()
 
     # Ensure only S1A or S1C are used (not both) for a single date
     satellite_counts = Counter()
@@ -1193,6 +1312,7 @@ def generate_products(
                     if not conf_layer_links:
                         print(f"[WARN] No CONF URLs found for {short_name} on {date}")
                         conf_DS = None
+                        DS = compile_and_load_data(urls, mode)
                     else:
                         print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
                         DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
@@ -2478,50 +2598,66 @@ def save_gtiff_as_cog(src_path: Path, dst_path: Path | None = None):
 def main():
     """
     Main entry point for the disaster analysis workflow.
-    This function parses command line arguments, sets up the output directory,
-    authenticates with Earthdata and ASF, and runs the next_pass module to generate
-    disaster products based on the specified mode (flood, fire, earthquake).
-    Raises:
-        Exception: If there are issues with directory creation, CSV reading, or product generation.
     """
     args = parse_arguments()
 
-    # Terminate if user selects 'earthquake' mode, for now
+    # Terminate if user selects 'earthquake' mode
     if args.mode == "earthquake":
         print("[INFO] Earthquake mode coming soon. Exiting...")
         return
+    
+    if args.local_dir:
+        print(f"[INFO] Running in LOCAL mode using data from: {args.local_dir}")
+        
+        # Verify local dir exists
+        if not args.local_dir.exists():
+            print(f"[ERROR] Local directory {args.local_dir} does not exist.")
+            return
 
-    output_dir = next_pass.run_next_pass(
-        bbox=args.bbox,
-        number_of_dates=args.number_of_dates,
-        date=args.date,
-        functionality=args.functionality,
-    )
+        # Scan directory and build metadata
+        df_opera = scan_local_directory(args.local_dir)
+        
+        if df_opera.empty:
+            print("[ERROR] No valid OPERA products found in local directory.")
+            return
 
-    make_output_dir(args.output_dir)
-    dest = args.output_dir / output_dir.name
-    output_dir.rename(dest)
-    print(f"[INFO] Moved next_pass output directory to {dest}")
+        # Prepare output directory
+        make_output_dir(args.output_dir)
+        mode_dir = args.output_dir / args.mode
+        make_output_dir(mode_dir)
 
-    # Read the metadata CSV file
-    df_opera = read_opera_metadata_csv(dest)
+    else:
+        print(f"[INFO] Running in CLOUD SEARCH mode.")
+        
+        output_dir = next_pass.run_next_pass(
+            bbox=args.bbox,
+            number_of_dates=args.number_of_dates,
+            date=args.date,
+            functionality=args.functionality
+        )
 
-    # Make a new directory with the mode name
-    mode_dir = args.output_dir / args.mode
-    make_output_dir(mode_dir)
-    print(f"[INFO] Created mode directory: {mode_dir}")
+        make_output_dir(args.output_dir)
+        dest = args.output_dir / output_dir.name
+        
+        # Move the next_pass output to the user specified output_dir (if they are different)
+        if output_dir.resolve() != dest.resolve():
+            output_dir.rename(dest)
+            print(f"[INFO] Moved next_pass output directory to {dest}")
+            processing_dir = dest
+        else:
+            processing_dir = output_dir
+
+        # Read the metadata CSV file downloaded by next_pass
+        df_opera = read_opera_metadata_csv(processing_dir)
+
+        # Make a new directory with the mode name
+        mode_dir = processing_dir / args.mode
+        make_output_dir(mode_dir)
+
+    print(f"[INFO] Outputting results to: {mode_dir}")
 
     # Generate products based on the mode
-    generate_products(
-        df_opera,
-        args.mode,
-        mode_dir,
-        args.layout_title,
-        args.bbox,
-        args.zoom_bbox,
-        args.filter_date,
-        args.reclassify_snow_ice,
-    )
+    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.bbox, args.zoom_bbox, args.filter_date, args.reclassify_snow_ice)
 
     return
 
