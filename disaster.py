@@ -749,6 +749,123 @@ def compute_and_write_difference(
         print(f"[INFO] Categorical difference written to {out_path}")
 
 
+def compute_and_write_difference_positive_change_only(
+    earlier_path: Path,
+    later_path: Path,
+    out_path: Path,
+    nodata_value: int = 255
+):
+    """
+    Computes a binary 'Positive Change' (Water Gain) raster.
+    Agnostic to DSWx-S1 and DSWx-HLS (WTR and BWTR layers).
+
+    Logic (Assign 1 - Blue):
+      1. New Water: Not Water (0) -> Any Water Class (1, 2, 3)
+      2. Intensification: Partial/Veg Water (2, 3) -> Open Water (1)
+    
+    Logic (Assign 0 - White):
+      - All other valid transitions (e.g., 1->1, 1->0, 3->3).
+      
+    Logic (Assign 255 - NoData):
+      - If either input is NoData (255) or Masked (>= 250).
+      
+    Metadata:
+      - Embeds a colormap: 0=White, 1=Blue (0,0,200,255).
+      - Embeds CLASS names for QGIS/GDAL.
+    """
+    import rioxarray
+    import xarray as xr
+    import numpy as np
+    import rasterio
+
+    print(f"[INFO] Computing generalized positive change (gain) layer for {out_path.name}...")
+
+    # 1. Open rasters
+    # Open unmasked to handle raw integer values directly
+    da_later = rioxarray.open_rasterio(later_path, masked=False).squeeze()
+    da_early = rioxarray.open_rasterio(earlier_path, masked=False).squeeze()
+
+    # 2. Define Groups
+    # Valid Water Classes across S1 and HLS WTR/BWTR:
+    # 1: Open Water (S1/HLS)
+    # 2: Partial Surface Water (HLS)
+    # 3: Inundated Vegetation (S1)
+    any_water = [1, 2, 3]
+    partial_or_veg = [2, 3]
+    open_water = 1
+    not_water = 0
+
+    # 3. Create Masks
+    # A. Nodata/Masks: Values >= 250 are essentially invalid/masked in all DSWx products
+    #    (250=HAND, 251=Layover, 252=Snow/Ice, 253=Cloud, 254=Ocean, 255=Fill)
+    mask_invalid = (da_early >= 250) | (da_later >= 250)
+
+    # B. Condition 1: New Water (0 -> 1, 2, 3)
+    #    Use np.isin for checking membership in list
+    cond_new_water = (da_early == not_water) & (np.isin(da_later, any_water))
+
+    # C. Condition 2: Intensification (2, 3 -> 1)
+    #    Partial/Veg becoming Open Water
+    cond_intensification = (np.isin(da_early, partial_or_veg)) & (da_later == open_water)
+
+    # Combine Gain Conditions
+    mask_gain = cond_new_water | cond_intensification
+
+    # 4. Create Output Array (uint8)
+    # Initialize with 0 (No Positive Change)
+    out_data = np.zeros_like(da_early.values, dtype="uint8")
+    
+    # Apply Gain (Set to 1)
+    out_data[mask_gain.values] = 1
+    
+    # Apply Nodata (Set to 255) - Overwrites any previous assignment
+    out_data[mask_invalid.values] = 255
+
+    # 5. Wrap in xarray for CRS/Transform handling
+    da_out = xr.DataArray(
+        out_data,
+        coords=da_later.coords,
+        dims=da_later.dims,
+        attrs=da_later.attrs
+    )
+    da_out.rio.write_crs(da_later.rio.crs, inplace=True)
+    da_out.rio.write_nodata(255, inplace=True)
+
+    # 6. Write to Temporary GeoTIFF
+    tmp_gtiff = out_path.with_suffix(".tmp.tif")
+    da_out.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True, dtype="uint8")
+
+    # 7. Inject Colormap and Metadata
+    # Color 0: White (255, 255, 255, 255)
+    # Color 1: Blue  (0, 0, 200, 255)
+    custom_colormap = {
+        0: (255, 255, 255, 255),
+        1: (0, 0, 200, 255)
+    }
+
+    # Define class names for QGIS Legend
+    class_names = {
+        0: "No Change or Water Loss",
+        1: "Water Gain"
+    }
+
+    with rasterio.open(tmp_gtiff, 'r+') as dst:
+        dst.write_colormap(1, custom_colormap)
+        tags = {f"CLASS_{k}": v for k, v in class_names.items()}
+        dst.update_tags(**tags)
+
+    # 8. Convert to COG
+    save_gtiff_as_cog(tmp_gtiff, out_path)
+
+    # Cleanup
+    try:
+        tmp_gtiff.unlink(missing_ok=True)
+    except:
+        pass
+
+    print(f"[INFO] Positive change difference written to {out_path}")
+
+
 def generate_products(
     df_opera,
     mode,
@@ -1226,66 +1343,43 @@ def generate_products(
                                 continue
 
                             # Name and path: {short}_{layer}_{LATER}_{EARLIER}{UTM}_diff.tif
-                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}{utm_suffix_k}_diff.tif"
+                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}{utm_suffix_k}_water_change.tif"
                             diff_path = (mode_dir / "data") / diff_name
 
-                            try:
-                                compute_and_write_difference(
-                                    earlier_path=early_info["path"],
-                                    later_path=later_info["path"],
-                                    out_path=diff_path,
-                                    nodata_value=None,
-                                    log=False,
-                                )
-                                print(f"[INFO] Wrote diff COG: {diff_path}")
+                        try:
+                            compute_and_write_difference_positive_change_only(
+                                earlier_path=early_info["path"],
+                                later_path=later_info["path"],
+                                out_path=diff_path,
+                                nodata_value=None,
+                            )
+                            print(f"[INFO] Wrote diff COG: {diff_path}")
+                            
+                            # Make a map with PyGMT
+                            diff_date_str = f"{d_later}_{d_early}"
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
 
-                                # Make a map with PyGMT
-                                diff_date_str = f"{d_later}_{d_early}"
-                                map_name = make_map(
-                                    maps_dir,
-                                    diff_path,
-                                    short_name_k,
-                                    layer_k,
-                                    diff_date_str,
-                                    bbox,
-                                    zoom_bbox,
-                                    is_difference=True,
-                                    utm_suffix=utm_suffix_k,
-                                )
-
-                                # Make a PDF layout
-                                if map_name:
-                                    diff_date_str_layout = f"{d_early}, {d_later}"
-                                    make_layout(
-                                        layouts_dir,
-                                        map_name,
-                                        short_name_k,
-                                        layer_k,
-                                        diff_date_str,
-                                        diff_date_str_layout,
-                                        layout_title,
-                                        reclassify_snow_ice,
-                                        utm_suffix=utm_suffix_k,
-                                    )
-
-                            except Exception as e:
-                                skipped.append(
-                                    {
-                                        "short_name": short_name_k,
-                                        "layer": layer_k,
-                                        "date_earlier": d_early,
-                                        "date_later": d_later,
-                                        "utm_suffix": utm_suffix_k,
-                                        "error": str(e),
-                                        "reason": "no overlapping data values; both rasters contain only nodata in the overlap region.",
-                                    }
-                                )
+                            # Make a PDF layout
+                            if map_name:
+                                diff_date_str_layout = f"{d_early}, {d_later}"
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
+                        
+                        except Exception as e:
+                            skipped.append({
+                                "short_name": short_name_k,
+                                "layer": layer_k,
+                                "date_earlier": d_early,
+                                "date_later": d_later,
+                                "error": str(e),
+                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
+                            })
 
         # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
         with open(report_path, "w") as f:
             json.dump(skipped, f, indent=2)
         print(f"[INFO] Difference skip report: {report_path} ({len(skipped)} skipped)")
+
 
     # Pair-wise differencing for 'landslide' mode (RTC-S1 log difference)
     if mode == "landslide":
@@ -1615,74 +1709,98 @@ def make_map(
 
             # 'flood' mode (DSWx)
             else:
-                cpt_path = maps_dir / "categorical_diff.cpt"
-                
-                # Define color map
-                color_map = {
-                    # No Change (Black / Transparent for 0)
-                    0:  (255, 255, 255, 0),    5:  (0, 0, 0, 255),
-                    10: (0, 0, 0, 255),        15: (0, 0, 0, 255),
-                    
-                    # Losses (Red/Orange)
-                    1:  (200, 0, 0, 255),      2:  (255, 127, 80, 255),
-                    3:  (255, 165, 0, 255),    9:  (255, 200, 100, 255),
-                    13: (255, 200, 100, 255),
+                # Check data range to determine if this is Binary Gain or Full Categorical
+                valid_vals = grd.values[~np.isnan(grd.values)]
+                max_val = valid_vals.max() if valid_vals.size > 0 else 0
 
-                    # Gains (Blues)
-                    4:  (0, 0, 200, 255),      8:  (100, 149, 237, 255),
-                    12: (60, 179, 113, 255),   6:  (30, 144, 255, 255),
-                    7:  (30, 144, 255, 255)
-                }
+                # --- Sub-Case B1: Binary Positive Change (Max value is 1) ---
+                if max_val <= 1:
+                    cpt_path = maps_dir / "binary_gain.cpt"
+                    
+                    # Create Simple Blue/White CPT
+                    with open(cpt_path, "w") as f:
+                        # 0 -> White (Fully Transparent 100)
+                        f.write("0 255/255/255@100 1 255/255/255@100\n")
+                        # 1 -> Blue (Opaque 0)
+                        f.write("1 0/0/200@0 2 0/0/200@0\n")
+                        # Background/NaN
+                        f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
 
-                # Build valid CPT by iterating continuously from 0 to 16
-                with open(cpt_path, "w") as f:
-                    for i in range(16):
-                        if i in color_map:
-                            r, g, b, a = color_map[i]
-                            # Convert 0-255 Alpha to GMT 0-100 Transparency (100 is transparent)
-                            transparency = int(100 * (1 - (a / 255.0)))
-                            f.write(f"{i} {r}/{g}/{b}@{transparency} {i+1} {r}/{g}/{b}@{transparency}\n")
-                        else:
-                            # Fill gaps (11, 14, masked 3/7/12) with transparent white
-                            f.write(f"{i} 255/255/255@100 {i+1} 255/255/255@100\n")
-                    
-                    # Background/NaN handling
-                    f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
-                
-                fig.grdimage(
-                    grid=grd, region=region_padded, projection=projection,
-                    cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
-                )
+                    fig.grdimage(
+                        grid=grd, region=region_padded, projection=projection,
+                        cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
+                    )
 
-                # Add legend
-                legend_path = maps_dir / "categorical_legend.txt"
-                with open(legend_path, "w") as f:
-                    f.write("H 10p,Helvetica-Bold Water Change Classes\n")
-                    f.write("D 0.2c 1p\n") # Horizontal line
+                    # Simple Legend
+                    legend_path = maps_dir / "binary_legend.txt"
+                    with open(legend_path, "w") as f:
+                        f.write("H 10p,Helvetica-Bold Water Change\n")
+                        f.write("D 0.2c 1p\n") 
+                        f.write("S 0.3c s 0.3c 0/0/200 0.25p 0.5c Water Gain\n")
                     
-                    # Blue Box for Gain
-                    f.write("S 0.3c s 0.3c 0/0/200 0.25p 0.5c Water Gain (Inundation)\n")
-                    # Light Blue Box for Partial Gain
-                    f.write("S 0.3c s 0.3c 30/144/255 0.25p 0.5c Water Gain (Partial)\n")
-                    # Red Box for Loss
-                    f.write("S 0.3c s 0.3c 200/0/0 0.25p 0.5c Water Loss (Drying)\n")
-                    # Light Red Box for Partial Loss
-                    f.write("S 0.3c s 0.3c 255/127/80 0.25p 0.5c Water Loss (Partial)\n")
-                    # Black Box for No Change
-                    f.write("S 0.3c s 0.3c 0/0/0 0.25p 0.5c Stable Water\n")
+                    fig.legend(spec=str(legend_path), position="JBC+jTC+o0c/1.0c+w4c", box="+gwhite+p1p")
                     
-                fig.legend(spec=str(legend_path), position="JBC+jTC+o0c/1.0c+w5c", box="+gwhite+p1p")
-                
-                try: 
-                    os.remove(cpt_path)
-                    os.remove(legend_path)
-                except: pass
-                
-                # Cleanup CPT
-                try: 
-                    os.remove(cpt_path)
-                except: 
-                    pass
+                    # Cleanup
+                    try:
+                        os.remove(cpt_path)
+                        os.remove(legend_path)
+                    except: pass
+
+                # --- Sub-Case B2: Full Categorical (Max value > 1) ---
+                else:
+                    cpt_path = maps_dir / "categorical_diff.cpt"
+                    
+                    # Define color map for full 0-15 classes
+                    color_map = {
+                        # No Change (Black / Transparent for 0)
+                        0:  (255, 255, 255, 0),    5:  (0, 0, 0, 255),
+                        10: (0, 0, 0, 255),        15: (0, 0, 0, 255),
+                        
+                        # Losses (Red/Orange)
+                        1:  (200, 0, 0, 255),      2:  (255, 127, 80, 255),
+                        3:  (255, 165, 0, 255),    9:  (255, 200, 100, 255),
+                        13: (255, 200, 100, 255),
+
+                        # Gains (Blues)
+                        4:  (0, 0, 200, 255),      8:  (100, 149, 237, 255),
+                        12: (60, 179, 113, 255),   6:  (30, 144, 255, 255),
+                        7:  (30, 144, 255, 255)
+                    }
+
+                    # Build valid CPT
+                    with open(cpt_path, "w") as f:
+                        for i in range(16):
+                            if i in color_map:
+                                r, g, b, a = color_map[i]
+                                transparency = int(100 * (1 - (a / 255.0)))
+                                f.write(f"{i} {r}/{g}/{b}@{transparency} {i+1} {r}/{g}/{b}@{transparency}\n")
+                            else:
+                                f.write(f"{i} 255/255/255@100 {i+1} 255/255/255@100\n")
+                        f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
+                    
+                    fig.grdimage(
+                        grid=grd, region=region_padded, projection=projection,
+                        cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
+                    )
+
+                    # Full Legend
+                    legend_path = maps_dir / "categorical_legend.txt"
+                    with open(legend_path, "w") as f:
+                        f.write("H 10p,Helvetica-Bold Water Change Classes\n")
+                        f.write("D 0.2c 1p\n")
+                        f.write("S 0.3c s 0.3c 0/0/200 0.25p 0.5c Water Gain (Inundation)\n")
+                        f.write("S 0.3c s 0.3c 30/144/255 0.25p 0.5c Water Gain (Partial)\n")
+                        f.write("S 0.3c s 0.3c 200/0/0 0.25p 0.5c Water Loss (Drying)\n")
+                        f.write("S 0.3c s 0.3c 255/127/80 0.25p 0.5c Water Loss (Partial)\n")
+                        f.write("S 0.3c s 0.3c 0/0/0 0.25p 0.5c Stable Water\n")
+                        
+                    fig.legend(spec=str(legend_path), position="JBC+jTC+o0c/1.0c+w5c", box="+gwhite+p1p")
+                    
+                    try: 
+                        os.remove(cpt_path)
+                        os.remove(legend_path)
+                    except:
+                        pass
 
         # Add grid image (based on product/layer)
         elif short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "WTR":
