@@ -241,14 +241,145 @@ def read_opera_metadata_csv(output_dir):
     return df
 
 
-def compile_and_load_data(
-    data_layer_links, mode, conf_layer_links=None, date_layer_links=None
-):
+def get_master_crs(df_opera, mode):
     """
-    Compile and load data from the provided layer links for mosaicking. This modified version
-    loads all datasets regardless of their CRS, but filters to the most common Sentinel-1
-    unit (S1A or S1C) if applicable.
+    Scans all relevant product URLs in the DataFrame to find the most common UTM CRS.
+    This defines the single global master grid for the entire time series.
+    """
+    from collections import Counter
+    from opera_utils.disp._remote import open_file
+    import rioxarray
 
+    print("[INFO] Scanning all granules to determine Global Master CRS...")
+
+    # Authenticate
+    username, password = authenticate()
+
+    # Collect all unique URLs relevant to the mode
+    all_urls = []
+    
+    # Define columns to check based on mode
+    if mode == "flood":
+        cols = ["Download URL WTR", "Download URL BWTR"]
+    elif mode == "fire":
+        cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS"]
+    elif mode == "landslide":
+        cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS", "Download URL RTC-VV", "Download URL RTC-VH"]
+    else:
+        return None
+
+    for col in cols:
+        if col in df_opera.columns:
+            all_urls.extend(df_opera[col].dropna().tolist())
+
+    # Remove duplicates
+    all_urls = list(set(all_urls))
+    
+    # Filter for S1A vs S1C if both exist (keep most common platform)
+    satellite_counts = Counter()
+    for link in all_urls:
+        if 'S1A' in link: satellite_counts['S1A'] += 1
+        elif 'S1C' in link: satellite_counts['S1C'] += 1
+    
+    if satellite_counts:
+        most_common_sat, _ = satellite_counts.most_common(1)[0]
+        all_urls = [u for u in all_urls if most_common_sat in u]
+
+    crs_counter = Counter()
+
+    # Open files to check CRS (metadata read only). Sample only first 50.
+    sample_size = min(len(all_urls), 50) 
+    
+    print(f"[INFO] Checking CRS of {sample_size} representative granules...")
+    
+    for i, url in enumerate(all_urls[:sample_size]):
+        try:
+            # Try direct open (local/s3)
+            with rioxarray.open_rasterio(url, masked=False) as ds:
+                crs_counter[str(ds.rio.crs)] += 1
+        except Exception:
+            try:
+                # Try via earthaccess/opera_utils
+                f = open_file(url, earthdata_username=username, earthdata_password=password)
+                with rioxarray.open_rasterio(f, masked=False) as ds:
+                    crs_counter[str(ds.rio.crs)] += 1
+            except Exception:
+                continue
+                
+    if not crs_counter:
+        raise RuntimeError("Could not determine CRS from any granules.")
+
+    # Get the winner
+    most_common_crs_str, count = crs_counter.most_common(1)[0]
+    
+    # Convert to PROJ4 string for consistency
+    from pyproj import CRS
+    proj4_str = CRS.from_string(most_common_crs_str).to_proj4()
+
+    print(f"[INFO] Global Master CRS determined: {proj4_str} (found in {count}/{sample_size} granules)")
+    return proj4_str
+
+
+def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
+    """
+    Defines a master pixel-aligned grid based on a lat/lon BBOX and target CRS.
+
+    Args:
+        bbox_latlon (list): Bounding box [S, N, W, E] in EPSG:4326.
+        target_crs_proj4 (str): The PROJ4 string for the target master CRS.
+        target_res (int): The target resolution in meters.
+
+    Returns:
+        dict: A dictionary with 'crs', 'shape', 'transform' for rioxarray.reproject.
+    """
+    import pyproj
+    from rasterio.transform import Affine
+
+    # Define transformers
+    transformer = pyproj.Transformer.from_crs(
+        "EPSG:4326", target_crs_proj4, always_xy=True
+    )
+    
+    # Get corners in target CRS
+    corners_lon = [bbox_latlon[2], bbox_latlon[3], bbox_latlon[3], bbox_latlon[2]]
+    corners_lat = [bbox_latlon[0], bbox_latlon[0], bbox_latlon[1], bbox_latlon[1]]
+    
+    xs, ys = transformer.transform(corners_lon, corners_lat)
+
+    # Find min/max of transformed coordinates
+    xmin = min(xs)
+    ymin = min(ys)
+    xmax = max(xs)
+    ymax = max(ys)
+
+    # Snap extent to be pixel-aligned to the resolution, ensuring any grid defined this way will be aligned.
+    xmin = np.floor(xmin / target_res) * target_res
+    ymin = np.floor(ymin / target_res) * target_res
+    xmax = np.ceil(xmax / target_res) * target_res
+    ymax = np.ceil(ymax / target_res) * target_res
+
+    # Calculate final width and height in pixels
+    width = int((xmax - xmin) / target_res)
+    height = int((ymax - ymin) / target_res)
+
+    # Create the GDAL/Rasterio Affine transform
+    # (top-left x, x-res, x-skew, top-left y, y-skew, y-res)
+    # Note that y-res is negative
+    transform = Affine.translation(xmin, ymax) * Affine.scale(target_res, -target_res)
+
+    return {
+        "dst_crs": target_crs_proj4,
+        "shape": (height, width),
+        "transform": transform,
+    }
+
+
+def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
+    """
+    Compile and load data from the provided layer links for mosaicking.
+    If there are S1A and S1C-derived OPERA products over the same area on the same day, only the most common
+    (S1A or S1C) is used in the mosaicking.
+    
     Args:
         data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
@@ -295,13 +426,9 @@ def compile_and_load_data(
 
         # Filter auxiliary links consistently if they exist
         if conf_layer_links:
-            conf_layer_links = [
-                link for i, link in enumerate(conf_layer_links) if is_most_common[i]
-            ]
+            conf_layer_links = [link for i, link in enumerate(conf_layer_links) if is_most_common[i]]
         if date_layer_links:
-            date_layer_links = [
-                link for i, link in enumerate(date_layer_links) if is_most_common[i]
-            ]
+            date_layer_links = [link for i, link in enumerate(date_layer_links) if is_most_common[i]]
 
     # Helper to load datasets
     def load_datasets(links):
@@ -458,9 +585,15 @@ def filter_by_date_and_confidence(
     for i, (da_data, da_date) in enumerate(zip(DS, DS_dates)):
         print(f"[INFO] Filtering granule {i + 1}/{len(DS)}")
 
-        # Date mask
-        date_mask = da_date >= date_threshold
+        # Create a mask that excludes "No Data" and "No Disturbance" values
+        valid_data_mask = da_data != 0
 
+        # Create date threshold mask
+        date_threshold_mask = da_date >= date_threshold
+
+        # Combine masks
+        date_mask = valid_data_mask & date_threshold_mask
+        
         # Optional confidence mask
         if DS_conf is not None and confidence_threshold is not None:
             conf_layer = DS_conf[i]
@@ -528,25 +661,6 @@ def compute_date_threshold(date_str):
     date_threshold = delta.days
 
     return date_threshold
-
-
-def same_utm_zone(crs_a: rasterio.crs.CRS, crs_b: rasterio.crs.CRS) -> bool:
-    """
-    Returns True if both are projected UTM with the same EPSG (e.g., 32611 vs 32611).
-    """
-    try:
-        if not crs_a or not crs_b:
-            return False
-        epsg_a = crs_a.to_epsg()
-        epsg_b = crs_b.to_epsg()
-        if epsg_a is None or epsg_b is None:
-            return False
-        # UTM EPSGs are typically 326xx (north) / 327xx (south)
-        return epsg_a == epsg_b and (
-            str(epsg_a).startswith("326") or str(epsg_a).startswith("327")
-        )
-    except Exception:
-        return False
 
 
 def compute_and_write_difference(
@@ -704,10 +818,9 @@ def generate_products(
     reclassify_snow_ice=False,
 ):
     """
-    Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode.
-    The logic is updated to generate a separate mosaic for each unique UTM zone present
-    in the intersecting granules for a given date, ensuring high-fidelity data processing.
-
+    Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
+    Granules are reprojected to the most common UTM zone present in the data for a given date.
+    
     Args:
         df_opera (pd.DataFrame): DataFrame containing OPERA products metadata.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
@@ -722,10 +835,10 @@ def generate_products(
     """
     import re
     from collections import defaultdict
-
     from rasterio.shutil import copy
-
     import opera_mosaic
+    from pyproj import CRS
+    from rasterio.enums import Resampling
 
     # Create data directory
     data_dir = mode_dir / "data"
@@ -739,6 +852,26 @@ def generate_products(
     layouts_dir = mode_dir / "layouts"
     make_output_dir(layouts_dir)
 
+    # Determine most common UTM CRS to warp all granules to across all dates
+    target_crs_proj4 = get_master_crs(df_opera, mode)
+
+    # Detect if the CRS is geographic to set the correct resolution
+    crs_obj = CRS.from_proj4(target_crs_proj4)
+    if crs_obj.is_geographic:
+        target_res = 0.0002695 # ~30m in degrees
+    else:
+        target_res = 30 # 30m in projected units
+
+    # Define the master grid properties
+    master_grid = get_master_grid_props(bbox, target_crs_proj4, target_res=target_res)
+    
+    # Define the resampling method.
+    if mode == "landslide":
+        resampling_method = Resampling.bilinear
+    else:
+        resampling_method = Resampling.nearest
+    
+    # Define short names and layer names based on mode
     if mode == "flood":
         short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
         layer_names = ["WTR", "BWTR"]
@@ -758,7 +891,7 @@ def generate_products(
     unique_dates.sort()
 
     # Create an index of mosaics created for use in pair-wise differencing
-    mosaic_index = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    mosaic_index = defaultdict(lambda: defaultdict(dict))
 
     for date in unique_dates:
         df_on_date = df_opera[df_opera["Start Date"] == date]
@@ -893,10 +1026,7 @@ def generate_products(
                         conf_DS = None
                     else:
                         print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
-
-                    DS, conf_DS = compile_and_load_data(
-                        urls, mode, conf_layer_links=conf_layer_links
-                    )
+                        DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
 
                 # Group loaded DataArrays by CRS (UTM Zone)
                 crs_groups = defaultdict(list)
@@ -944,52 +1074,13 @@ def generate_products(
                             continue
                         crs_groups[crs_str].append(da_data)
 
-                # Iterate through each CRS group to process and mosaic
+                # These lists will hold the in-memory warped xarray objects
+                all_warped_ds = []
+                colormap = None # Grab colormap during filtering for use in final mosaic
+
+                # Iterate through each CRS group to process, then warp to the master grid
                 for crs_str, ds_group in crs_groups.items():
-
-                    # Generate a descriptive UTM suffix (e.g., _18N, _17S)
-                    utm_suffix = ""
-
-                    # Try to extract the UTM Zone number and Hemisphere (N/S) from the CRS string
-                    utm_match = re.search(r"UTM Zone (\d{1,2})([NS])", crs_str)
-
-                    if utm_match:
-                        zone_number = utm_match.group(1)
-                        hemisphere = utm_match.group(2)
-                        utm_suffix = f"_{zone_number}{hemisphere}"
-                        print(f"[INFO] Detected UTM Zone: {utm_suffix}")
-                    else:
-                        # Fallback to EPSG if UTM info isn't explicitly in the WKT string (e.g., just "EPSG:32618")
-                        crs_match = re.search(r"EPSG:(\d+)", crs_str)
-                        if crs_match:
-                            epsg_code = int(crs_match.group(1))
-
-                            # Standard UTM EPSG codes are 326xx (North) or 327xx (South)
-                            if 32600 <= epsg_code <= 32660:
-                                zone_number = epsg_code - 32600
-                                utm_suffix = f"_{zone_number}N"
-                                print(
-                                    f"[INFO] Deduced UTM Zone from N-EPSG: {utm_suffix}"
-                                )
-                            elif 32700 <= epsg_code <= 32760:
-                                zone_number = epsg_code - 32700
-                                utm_suffix = f"_{zone_number}S"
-                                print(
-                                    f"[INFO] Deduced UTM Zone from S-EPSG: {utm_suffix}"
-                                )
-                            else:
-                                # Fallback for non-standard or unknown EPSG
-                                utm_suffix = f"_EPSG{epsg_code}"
-                                print(
-                                    f"[WARN] Non-UTM EPSG code {epsg_code}. Using suffix: {utm_suffix}"
-                                )
-                        else:
-                            # Last resort: use a hash of the full CRS string
-                            print(
-                                f"[WARN] Could not parse UTM or EPSG from CRS string: {crs_str}. Using raw hash."
-                            )
-                            utm_suffix = f"_Hash{hash(crs_str) % 10000}"
-
+                    print(f"[INFO] Processing and Warping {len(ds_group)} granules from {crs_str}...")
                     current_conf_DS = conf_groups.get(crs_str)
                     current_date_DS = date_groups.get(crs_str)
 
@@ -1022,7 +1113,7 @@ def generate_products(
                                 )
                             else:
                                 print(
-                                    f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers for CRS {utm_suffix}"
+                                    f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers"
                                 )
                                 ds_group, colormap = reclassify_snow_ice_as_water(
                                     ds_group, current_conf_DS
@@ -1036,88 +1127,81 @@ def generate_products(
                                     f"[INFO] Snow/ice reclassification is only applicable to DSWx-HLS. Skipping for {short_name}."
                                 )
                             else:
-                                print(
-                                    "[INFO] Snow/ice reclassification not requested; proceeding without reclassification."
-                                )
+                                print("[INFO] Snow/ice reclassification not requested; proceeding without reclassification.")
 
-                    # Use pre-determined colormap or make another attempt to get it. If still None, proceed without it.
-                    if colormap is None:
-                        try:
-                            colormap = opera_mosaic.get_image_colormap(ds_group[0])
-                        except Exception:
-                            colormap = None
+                    # Reproject the processed granules to the master grid
+                    print(f"[INFO] Warping {len(ds_group)} main granules to master grid...")
+                    for da in ds_group:
+                        grid_props = master_grid.copy()
+                        dst_crs_val = grid_props.pop("dst_crs")
+                        da_warped = da.rio.reproject(
+                            dst_crs_val,
+                            **grid_props,
+                            resampling=resampling_method
+                        )
+                        all_warped_ds.append(da_warped)
+                
+                # Mosaic the warped granules
+                if not all_warped_ds:
+                    print(f"[WARN] No valid granules to mosaic for {short_name} - {layer} on {date}. Skipping.")
+                    continue
+                    
+                print(f"[INFO] Mosaicking {len(all_warped_ds)} total warped granules for {date}...")
 
-                    # Mosaic the datasets using the appropriate method/rule
-                    mosaic, _, nodata = opera_mosaic.mosaic_opera(
-                        ds_group, product=short_name, merge_args={}
-                    )
-                    image = opera_mosaic.array_to_image(
-                        mosaic, colormap=colormap, nodata=nodata
-                    )
+                # Use pre-determined colormap or make another attempt to get it. If still None, proceed without it.
+                if colormap is None:
+                    try:
+                        colormap = opera_mosaic.get_image_colormap(DS[0])
+                    except Exception:
+                        colormap = None
+                    
+                # Mosaic the datasets using the appropriate method/rule
+                mosaic, _, nodata = opera_mosaic.mosaic_opera(all_warped_ds, product=short_name, merge_args={})
+                image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata)
 
-                    # Create filename and full paths
-                    mosaic_name = f"{short_name}_{layer}_{date}{utm_suffix}_mosaic.tif"
-                    mosaic_path = data_dir / mosaic_name
-                    tmp_path = data_dir / f"tmp_{mosaic_name}"
+                # Create filename and full paths
+                mosaic_name = f"{short_name}_{layer}_{date}_mosaic.tif"
+                mosaic_path = data_dir / mosaic_name
+                tmp_path = data_dir / f"tmp_{mosaic_name}"
 
-                    # Save the mosaic to a temporary GeoTIFF
-                    copy(image, tmp_path, driver="GTiff")
+                # Save the mosaic to a temporary GeoTIFF
+                copy(image, tmp_path, driver="GTiff")
 
-                    warp_args = {
-                        "xRes": 30,
-                        "yRes": 30,
-                        "creationOptions": ["COMPRESS=DEFLATE"],
-                    }
+                # Convert to COG (writes back into mosaic_path)
+                save_gtiff_as_cog(tmp_path, mosaic_path)
+                print(f"[INFO] Mosaic written as COG: {mosaic_path}")
 
-                    if short_name.startswith("OPERA_L2_RTC"):
-                        warp_args["outputType"] = gdal.GDT_Float32
+                # Remove temporary file
+                cleanup_temp_file(tmp_path)  # Cleanup on exit point
 
-                    # Reproject/compress using GDAL directly into the final GeoTIFF
-                    gdal.Warp(mosaic_path, tmp_path, **warp_args)
+                mosaic_index[short_name][layer][str(date)] = {
+                    "path": mosaic_path,
+                    "crs": master_grid["dst_crs"] # Store the master CRS string
+                }
 
-                    # Convert to COG (writes back into mosaic_path)
-                    save_gtiff_as_cog(mosaic_path, mosaic_path)
+                # Make a map with PyGMT
+                map_name = make_map(
+                    maps_dir,
+                    mosaic_path,
+                    short_name,
+                    layer,
+                    date,
+                    bbox,
+                    zoom_bbox,
+                    is_difference=False
+                )
 
-                    print(f"[INFO] Mosaic written as COG: {mosaic_path}")
-
-                    # Clean up tmp file
-                    if tmp_path.exists():
-                        tmp_path.unlink()
-
-                    # Add info to the mosiac index for pair-wise differencing
-                    with rasterio.open(mosaic_path) as ds:
-                        mosaic_crs = ds.crs
-
-                    # UPDATED STRUCTURE: [short_name][layer][date] = {utm_suffix: info_dict}
-                    mosaic_index[short_name][layer][str(date)][utm_suffix] = {
-                        "path": mosaic_path,
-                        "crs": mosaic_crs,
-                    }
-                    # Make a map with PyGMT
-                    map_name = make_map(
-                        maps_dir,
-                        mosaic_path,
-                        short_name,
-                        layer,
-                        date,
-                        bbox,
-                        zoom_bbox,
-                        is_difference=False,
-                        utm_suffix=utm_suffix,
-                    )
-
-                    # Make a PDF layout
-                    make_layout(
-                        layouts_dir,
-                        map_name,
-                        short_name,
-                        layer,
-                        date,
-                        layout_date,
-                        layout_title,
-                        reclassify_snow_ice,
-                        utm_suffix=utm_suffix,
-                    )
+                # Make a PDF layout
+                make_layout(
+                    layouts_dir,
+                    map_name,
+                    short_name,
+                    layer,
+                    date,
+                    layout_date,
+                    layout_title,
+                    reclassify_snow_ice
+                )
 
     # Pair-wise differencing for 'flood' mode
     if mode == "flood":
@@ -1127,103 +1211,64 @@ def generate_products(
         for short_name_k, layers_dict in mosaic_index.items():
             for layer_k, date_map in layers_dict.items():
 
-                # Restructure by UTM zone for differencing
-                utm_date_map = defaultdict(lambda: defaultdict(dict))
-                for d, utm_dict in date_map.items():
-                    for utm, info in utm_dict.items():
-                        utm_date_map[utm][d] = info
+                dates = sorted(date_map.keys()) 
 
-                for utm_suffix_k, utm_map in utm_date_map.items():
-                    dates = sorted(utm_map.keys())
+                # Generate difference for all possible pairs
+                for i in range(len(dates)):
+                    for j in range(i + 1, len(dates)):
+                        d_early = dates[i]
+                        d_later = dates[j]
 
-                    # Generate difference for all possible pairs within this UTM zone
-                    for i in range(len(dates)):
-                        for j in range(i + 1, len(dates)):
-                            d_early = dates[i]
-                            d_later = dates[j]
+                        early_info = date_map[d_early]
+                        later_info = date_map[d_later]
+                        
+                        crs_a = early_info["crs"]
+                        crs_b = later_info["crs"]
+                        
+                        if crs_a != crs_b:
+                            skipped.append({
+                                "short_name": short_name_k,
+                                "layer": layer_k,
+                                "date_earlier": d_early,
+                                "date_later": d_later,
+                                "crs_earlier": crs_a,
+                                "crs_later": crs_b,
+                                "reason": "Mosaics have different master CRS (this should not happen)"
+                            })
+                            continue
 
-                            early_info = utm_map[d_early]
-                            later_info = utm_map[d_later]
+                        # Name and path
+                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_diff.tif"
+                        diff_path = (mode_dir / "data") / diff_name
 
-                            crs_a = early_info["crs"]
-                            crs_b = later_info["crs"]
+                        try:
+                            compute_and_write_difference(
+                                earlier_path=early_info["path"],
+                                later_path=later_info["path"],
+                                out_path=diff_path,
+                                nodata_value=None,
+                                log=False
+                            )
+                            print(f"[INFO] Wrote diff COG: {diff_path}")
+                            
+                            # Make a map with PyGMT
+                            diff_date_str = f"{d_later}_{d_early}"
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
 
-                            # The check will always pass if utm_map was created correctly.
-                            if not same_utm_zone(crs_a, crs_b):
-                                # This block should rarely be hit if the grouping is correct
-                                skipped.append(
-                                    {
-                                        "short_name": short_name_k,
-                                        "layer": layer_k,
-                                        "date_earlier": d_early,
-                                        "date_later": d_later,
-                                        "utm_suffix": utm_suffix_k,
-                                        "crs_earlier": (
-                                            crs_a.to_string() if crs_a else None
-                                        ),
-                                        "crs_later": (
-                                            crs_b.to_string() if crs_b else None
-                                        ),
-                                        "reason": "internal CRS mismatch after grouping (error)",
-                                    }
-                                )
-                                continue
-
-                            # Name and path: {short}_{layer}_{LATER}_{EARLIER}{UTM}_diff.tif
-                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}{utm_suffix_k}_diff.tif"
-                            diff_path = (mode_dir / "data") / diff_name
-
-                            try:
-                                compute_and_write_difference(
-                                    earlier_path=early_info["path"],
-                                    later_path=later_info["path"],
-                                    out_path=diff_path,
-                                    nodata_value=None,
-                                    log=False,
-                                )
-                                print(f"[INFO] Wrote diff COG: {diff_path}")
-
-                                # Make a map with PyGMT
-                                diff_date_str = f"{d_later}_{d_early}"
-                                map_name = make_map(
-                                    maps_dir,
-                                    diff_path,
-                                    short_name_k,
-                                    layer_k,
-                                    diff_date_str,
-                                    bbox,
-                                    zoom_bbox,
-                                    is_difference=True,
-                                    utm_suffix=utm_suffix_k,
-                                )
-
-                                # Make a PDF layout
-                                if map_name:
-                                    diff_date_str_layout = f"{d_early}, {d_later}"
-                                    make_layout(
-                                        layouts_dir,
-                                        map_name,
-                                        short_name_k,
-                                        layer_k,
-                                        diff_date_str,
-                                        diff_date_str_layout,
-                                        layout_title,
-                                        reclassify_snow_ice,
-                                        utm_suffix=utm_suffix_k,
-                                    )
-
-                            except Exception as e:
-                                skipped.append(
-                                    {
-                                        "short_name": short_name_k,
-                                        "layer": layer_k,
-                                        "date_earlier": d_early,
-                                        "date_later": d_later,
-                                        "utm_suffix": utm_suffix_k,
-                                        "error": str(e),
-                                        "reason": "no overlapping data values; both rasters contain only nodata in the overlap region.",
-                                    }
-                                )
+                            # Make a PDF layout
+                            if map_name:
+                                diff_date_str_layout = f"{d_early}, {d_later}"
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
+                        
+                        except Exception as e:
+                            skipped.append({
+                                "short_name": short_name_k,
+                                "layer": layer_k,
+                                "date_earlier": d_early,
+                                "date_later": d_later,
+                                "error": str(e),
+                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
+                            })
 
         # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
@@ -1241,104 +1286,69 @@ def generate_products(
         for short_name_k, layers_dict in mosaic_index.items():
             for layer_k, date_map in layers_dict.items():
 
-                utm_date_map = defaultdict(lambda: defaultdict(dict))
-                for d, utm_dict in date_map.items():
-                    for utm, info in utm_dict.items():
-                        utm_date_map[utm][d] = info
+                # Only compute log-diff for RTC products
+                if short_name_k != "OPERA_L2_RTC-S1_V1":
+                    continue
+                    
+                dates = sorted(date_map.keys())
 
-                for utm_suffix_k, utm_map in utm_date_map.items():
-                    # Only compute log-diff for RTC products
-                    if short_name_k != "OPERA_L2_RTC-S1_V1":
-                        continue
+                # Generate difference for all possible pairs
+                for i in range(len(dates)):
+                    for j in range(i + 1, len(dates)):
+                        d_early = dates[i]
+                        d_later = dates[j]
 
-                    dates = sorted(utm_map.keys())
+                        early_info = date_map[d_early]
+                        later_info = date_map[d_later]
 
-                    # Generate difference for all possible pairs within this UTM zone
-                    for i in range(len(dates)):
-                        for j in range(i + 1, len(dates)):
-                            d_early = dates[i]
-                            d_later = dates[j]
+                        crs_a = early_info["crs"]
+                        crs_b = later_info["crs"]
+                        
+                        # Double check the CRS are identical
+                        if crs_a != crs_b:
+                            skipped.append({
+                                "short_name": short_name_k,
+                                "layer": layer_k,
+                                "date_earlier": d_early,
+                                "date_later": d_later,
+                                "crs_earlier": crs_a,
+                                "crs_later": crs_b,
+                                "reason": "Mosaics have different master CRS (this should not happen)"
+                            })
+                            continue
 
-                            early_info = utm_map[d_early]
-                            later_info = utm_map[d_later]
+                        # Name and path: REMOVED {UTM}
+                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_log-diff.tif"
+                        diff_path = (mode_dir / "data") / diff_name
+                        
+                        try:
+                            compute_and_write_difference(
+                                earlier_path=early_info["path"],
+                                later_path=later_info["path"],
+                                out_path=diff_path,
+                                nodata_value=None,
+                                log=True
+                            )
+                            print(f"[INFO] Wrote diff COG: {diff_path}")
+                            
+                            # Make a map with PyGMT
+                            diff_date_str = f"{d_later}_{d_early}"
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
 
-                            # The UTM/CRS check is now mostly redundant since they are grouped.
-                            crs_a = early_info["crs"]
-                            crs_b = later_info["crs"]
-                            if not same_utm_zone(crs_a, crs_b):
-                                skipped.append(
-                                    {
-                                        "short_name": short_name_k,
-                                        "layer": layer_k,
-                                        "date_earlier": d_early,
-                                        "date_later": d_later,
-                                        "utm_suffix": utm_suffix_k,
-                                        "crs_earlier": (
-                                            crs_a.to_string() if crs_a else None
-                                        ),
-                                        "crs_later": (
-                                            crs_b.to_string() if crs_b else None
-                                        ),
-                                        "reason": "internal CRS mismatch after grouping (error)",
-                                    }
-                                )
-                                continue
+                            # Make a PDF layout
+                            if map_name:
+                                diff_date_str_layout = f"{d_early}, {d_later}"
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
 
-                            # Name and path: {short}_{layer}_{LATER}_{EARLIER}{UTM}_log_diff.tif
-                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}{utm_suffix_k}_log-diff.tif"
-                            diff_path = (mode_dir / "data") / diff_name
-
-                            try:
-                                compute_and_write_difference(
-                                    earlier_path=early_info["path"],
-                                    later_path=later_info["path"],
-                                    out_path=diff_path,
-                                    nodata_value=None,
-                                    log=True,
-                                )
-                                print(f"[INFO] Wrote diff COG: {diff_path}")
-
-                                # Make a map with PyGMT
-                                diff_date_str = f"{d_later}_{d_early}"
-                                map_name = make_map(
-                                    maps_dir,
-                                    diff_path,
-                                    short_name_k,
-                                    layer_k,
-                                    diff_date_str,
-                                    bbox,
-                                    zoom_bbox,
-                                    is_difference=True,
-                                    utm_suffix=utm_suffix_k,
-                                )
-
-                                # Make a PDF layout
-                                if map_name:
-                                    diff_date_str_layout = f"{d_early}, {d_later}"
-                                    make_layout(
-                                        layouts_dir,
-                                        map_name,
-                                        short_name_k,
-                                        layer_k,
-                                        diff_date_str,
-                                        diff_date_str_layout,
-                                        layout_title,
-                                        reclassify_snow_ice,
-                                        utm_suffix=utm_suffix_k,
-                                    )
-
-                            except Exception as e:
-                                skipped.append(
-                                    {
-                                        "short_name": short_name_k,
-                                        "layer": layer_k,
-                                        "date_earlier": d_early,
-                                        "date_later": d_later,
-                                        "utm_suffix": utm_suffix_k,
-                                        "error": str(e),
-                                        "reason": "no overlapping data values; both rasters contain only nodata in the overlap region.",
-                                    }
-                                )
+                        except Exception as e:
+                            skipped.append({
+                                "short_name": short_name_k,
+                                "layer": layer_k,
+                                "date_earlier": d_early,
+                                "date_later": d_later,
+                                "error": str(e),
+                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
+                            })
 
         # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "log-difference_skipped_pairs.json"
@@ -1420,8 +1430,7 @@ def make_map(
     date,
     bbox,
     zoom_bbox=None,
-    is_difference=False,
-    utm_suffix="",
+    is_difference=False
 ):
     """
     Create a map using PyGMT from the provided mosaic path.
@@ -1435,8 +1444,6 @@ def make_map(
         bbox (list): Bounding box in the form [South, North, West, East].
         zoom_bbox (list, optional): Bounding box for the zoom-in inset map, in the form [South, North, West, East].
         is_difference (bool, optional): Flag to indicate if the mosaic is a difference product. Defaults to False.
-        utm_suffix (str, optional): UTM zone suffix (e.g., '_18N') for unique naming. Defaults to "".
-
     Returns:
         map_name (Path): Path to the saved map image.
     Raises:
@@ -1467,15 +1474,7 @@ def make_map(
         date_str = date
 
     # Create a temporary path for the WGS84 reprojected file
-    mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", f"_WGS84_TMP{utm_suffix}.tif"))
-
-    def cleanup_temp_file(filepath):
-        """Helper to safely remove the temporary file."""
-        if filepath.exists():
-            try:
-                os.remove(filepath)
-            except Exception as e:
-                print(f"[WARN] Failed to clean up temporary WGS84 file {filepath}: {e}")
+    mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", "_WGS84_TMP.tif"))
 
     try:
         # Reproject to WGS84 (into the temp file)
@@ -1490,6 +1489,8 @@ def make_map(
         # Load mosaic from the temporary file
         grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
 
+        bounds = grd.rio.bounds()
+        
         try:
             nodata_value = grd.rio.nodata
         except AttributeError:
@@ -1869,9 +1870,9 @@ def make_map(
             )
 
         # Export map
-        map_name = maps_dir / f"{short_name}_{layer}_{date}{utm_suffix}_map.png"
+        map_name = maps_dir / f"{short_name}_{layer}_{date}_map.png"
         fig.savefig(map_name, dpi=900)
-        cleanup_temp_file(mosaic_wgs84)
+        cleanup_temp_file(mosaic_wgs84) 
 
         return map_name
 
@@ -1889,8 +1890,7 @@ def make_layout(
     date,
     layout_date,
     layout_title,
-    reclassify_snow_ice=False,
-    utm_suffix="",
+    reclassify_snow_ice=False
 ):
     """
     Create a layout using matplotlib for the provided map.
@@ -2191,9 +2191,18 @@ def make_layout(
     plt.tight_layout()
 
     # layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
-    layout_name = layout_dir / f"{short_name}_{layer}_{date}{utm_suffix}_layout.pdf"
+    layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
     return
+
+
+def cleanup_temp_file(filepath):
+    """Helper to safely remove the temporary file."""
+    if filepath.exists():
+        try:
+            os.remove(filepath)
+        except Exception as e:
+            print(f"[WARN] Failed to clean up temporary WGS84 file {filepath}: {e}")
 
 
 def save_gtiff_as_cog(src_path: Path, dst_path: Path | None = None):
