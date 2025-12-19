@@ -671,140 +671,310 @@ def compute_and_write_difference(
     log: bool = False,
 ):
     """
-    Create a difference raster for either 'flood' or 'landslide' mode using DSWx and/or RTC products.
-    The log difference is computed if log=True (in 'landslide' mode).
-    If either pixel is nodata in the inputs, output nodata at that pixel.
-    Writes a COG to out_path via the save_gtiff_as_cog helper.
-
-    Differencing for 'flood' mode (DSWx products, log=False) implements a categorical categorical
-    transition map where each unique pair of (Earlier, Later) classes in {0, 1, 2, 3} (i.e. no water/water classes)
-    gets a unique integer code (Code = L * 4 + E). Pixels at locations with values outside of this list (e.g, cloud, snow/ice)
-    in either Earlier or Later raster, are set to nodata in the output difference raster.
-
-    The transition codes and descriptions are stored in the GeoTIFF metadata.
+    Create a difference raster for 'flood' or 'landslide' mode.
+    Writes a uint8 categorical raster with an embedded color palette for DSWx products.
     """
     import rioxarray
     import xarray as xr
+    import numpy as np
+    import rasterio
 
     # Open rasters and apply mask for nodata handling
     da_later = rioxarray.open_rasterio(later_path, masked=True)
     da_early = rioxarray.open_rasterio(earlier_path, masked=True)
 
-    # Determine the nodata value to use
+    # Determine the nodata value to use (nd) from inputs
     nd = nodata_value
     if nd is None:
         nd = da_later.rio.nodata
         if nd is None:
             nd = da_early.rio.nodata
 
-    # Difference calculation (based on 'log' argument)
+    # Landslide mode
     if log:
+        # Compute log difference for RTC-S1
         diff = 10 * np.log10(da_later / da_early)
         diff = diff.astype("float32")
         print("[INFO] Computed log difference for RTC-S1.")
-        # Clear existing metadata and set a description
+        
         diff.attrs.clear()
         diff.attrs["DESCRIPTION"] = "Log Ratio Difference (Later / Earlier) for RTC-S1"
-        metadata_to_save = {}
-    else:
-        print("[INFO] Computed categorical transition codes for DSWx.")
-        VALID_CLASSES = [0, 1, 2, 3]
-        MAX_CLASS_VALUE = 4
 
-        # Define the transition codes and their descriptions (L * 4 + E)
-        TRANSITION_DESCRIPTIONS = {
-            # E (Earlier) -> L (Later)
-            # WATER CHANGE (LOSS/RECESSION) (Later < Earlier)
-            1: "Loss: Open Water (1) -> Not Water (0)",
-            2: "Loss: Partial Water (2) -> Not Water (0)",
-            3: "Loss: Inundated Veg (3) -> Not Water (0)",
-            9: "Loss/Change: Partial Water (2) -> Open Water (1)",
-            13: "Loss/Change: Inundated Veg (3) -> Open Water (1)",
-            14: "Loss/Change: Inundated Veg (3) -> Partial Water (2)",
-            # WATER CHANGE (GAIN/INUNDATION) (Later > Earlier)
-            4: "Inundation: Not Water (0) -> Open Water (1)",
-            8: "Inundation: Not Water (0) -> Partial Water (2)",
-            12: "Inundation: Not Water (0) -> Inundated Veg (3)",
-            6: "Change/Gain: Open Water (1) -> Partial Water (2)",
-            7: "Change/Gain: Open Water (1) -> Inundated Veg (3)",
-            11: "Change/Gain: Partial Water (2) -> Inundated Veg (3)",
-            # NO CHANGE (Later = Earlier)
-            0: "No Change: Not Water (0) -> Not Water (0)",
-            5: "No Change: Open Water (1) -> Open Water (1)",
-            10: "No Change: Partial Water (2) -> Partial Water (2)",
-            15: "No Change: Inundated Veg (3) -> Inundated Veg (3)",
-        }
+        # Handle Nodata
+        input_nodata_mask = xr.where(da_later.isnull() | da_early.isnull(), True, False)
+        result_nan_mask = np.isnan(diff)
+        final_nodata_mask = input_nodata_mask | result_nan_mask
 
-        # Compute the transition code: Code = L * MAX_CLASS_VALUE + E
-        L = da_later.fillna(0).astype(int)
-        E = da_early.fillna(0).astype(int)
-        transition_code = L * MAX_CLASS_VALUE + E
-
-        # Create and apply a mask for invalid classes (25x values)
-        invalid_class_mask = ~(np.isin(L, VALID_CLASSES) & np.isin(E, VALID_CLASSES))
-        diff = xr.where(invalid_class_mask, np.nan, transition_code).astype(np.float32)
-
-        # Prepare metadata for saving
-        diff.attrs.clear()
-        diff.attrs["DESCRIPTION"] = (
-            "Categorical Transition Map (DSWx-HLS/S1 Water Products)"
-        )
-
-        # Convert the Python dict to GDAL metadata keys (KEY=VALUE) for GIS software
-        metadata_to_save = {
-            f"TRANSITION_CODE_{code}": desc
-            for code, desc in TRANSITION_DESCRIPTIONS.items()
-        }
-        metadata_to_save["CODING_SCHEME"] = (
-            "Transition Code (C) = L * 4 + E, where E, L are classes (0-3) in Earlier and Later rasters."
-        )
-
-    # Compute a mask for any location that was nodata in either input
-    input_nodata_mask = xr.where(
-        xr.ufuncs.isnan(da_later) | xr.ufuncs.isnan(da_early),
-        True,
-        False,
-    )
-
-    # Remove any Inf or NaN values that may have resulted from the difference calculation
-    artifact_mask = xr.where(
-        xr.ufuncs.isinf(diff) | xr.ufuncs.isnan(diff),
-        True,
-        False,
-    )
-
-    # Combine the masks
-    final_nodata_mask = input_nodata_mask | artifact_mask
-
-    # Apply the nodata value to masked pixels and set metadata
-    if nd is not None:
-        # Wherever the mask is True (input was nodata), set the difference to 'nd'
         diff = xr.where(final_nodata_mask, nd, diff)
-
-        # Write nodata value and CRS metadata
         diff.rio.write_nodata(nd, encoded=True, inplace=True)
         diff.rio.write_crs(da_later.rio.crs, inplace=True)
 
-        # Write the resulting difference array to a temporary GeoTIFF
+        # Write Temp
         tmp_gtiff = out_path.with_suffix(".tmp.tif")
+        diff.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True, dtype="float32")
+        save_gtiff_as_cog(tmp_gtiff, out_path)
+        try: 
+            tmp_gtiff.unlink(missing_ok=True)
+        except: 
+            pass
+        return
 
-        # Save with metadata
-        diff.rio.to_raster(
-            tmp_gtiff,
-            compress="DEFLATE",
-            tiled=True,
-            dtype="float32",
-            **{"GDAL_METADATA": metadata_to_save},
+    # Compute categorical difference for DSWx products
+    else:
+        print("[INFO] Computing categorical transition codes for DSWx...")
+        
+        # FIX: Ensure nd is a valid integer (255) if input nodata is None or NaN
+        # This prevents the 'cannot convert float NaN to integer' error
+        if nd is None or np.isnan(nd):
+            nd = 255.0
+        
+        nd_float = float(nd)
+
+        # Detect either DSWx-HLS or DSWx-S1 from filename
+        filename = str(out_path.name)
+        is_hls = "HLS" in filename
+        is_s1 = "S1" in filename and not is_hls
+
+        # Define the Color Palette (R, G, B, Alpha)
+        # Colors: Blues for Gains, Reds for Losses, Transparent for No Change
+        full_colormap = {
+            # --- NO CHANGE (Transparent) ---
+            0: (255, 255, 255, 255), # 0 -> 0: Not Water -> Not Water (White)
+            5: (0, 0, 0, 255), # 1 -> 1: Open Water -> Open Water (Black)
+            10: (0, 0, 0, 255), # 2 -> 2: Partial Surface Water -> Partial Surface Water (Black)
+            15: (0, 0, 0, 255), # 3 -> 3: Inundated Vegetation -> Inundated Vegetation (Black)
+
+            # --- WATER LOSS (Reds/Oranges) ---
+            # "Recession" (Wet -> Dry)
+            1: (200, 0, 0, 255), # 1->0: Open Water -> Not Water (Deep Red)
+            2: (255, 127, 80, 255), # 2->0: Partial Surface Water -> Not Water (Lightest Red/Coral)
+            # 3: (255, 127, 80, 255), # 3->0: Inundated Vegetation -> Not Water (Lightest Red/Coral)
+            9: (255, 200, 100, 255), # 1->2: Open Water -> Partial Surface Water (Light Red)
+            #13: (255, 200, 100, 255), # 1->3: Open Water -> Inundated Vegetation (Light Red)
+
+            # --- WATER GAIN (Blues) ---
+            # "Inundation" (Dry -> Wet)
+            4: (0, 0, 200, 255), # 0->1: Not Water -> Open Water (Deepest Blue)
+            8: (100, 149, 237, 255), # 0->2: Not Water -> Partial Surface Water (Lightest Blue)
+            # 12: (100, 149, 237, 255), # 0->3: Not Water -> Inundated Vegetation (Lightest Blue)
+            6: (30, 144, 255, 255), # 2->1: Partial Surface Water -> Open Water (Light Blue)
+            # 7: (30, 144, 255, 255), # 3->1: Inundated Vegetation -> Open Water (Light Blue)
+        }
+
+        full_names = {
+            0: "No Change: Not Water",
+            5: "No Change: Open Water",
+            1: "Loss: Open Water to Not Water",
+            4: "Gain: Not Water to Open Water",
+            # HLS Specific
+            10: "No Change: Partial Surface Water",
+            2: "Loss: Partial Surface Water to Not Water",
+            9: "Loss: Open Water to Partial Surface Water",
+            8: "Gain: Not Water to Partial Surface Water",
+            6: "Gain: Partial Surface Water to Open Water",
+            # S1 Specific
+            15: "No Change: Inundated Vegetation",
+            3: "Loss: Inundated Vegetation to Not Water",
+            13: "Loss: Open Water to Inundated Vegetation",
+            12: "Gain: Not Water to Inundated Vegetation",
+            7: "Gain: Inundated Vegetation to Open Water",
+        }
+
+        # Filter colormap and names based on product type
+        active_colormap = {}
+        active_names = {}
+        
+        # Always include universal classes (0, 1, 4, 5)
+        universal_keys = [0, 1, 4, 5]
+
+        if is_hls:
+            # HLS: Include Universal + Partial Water (2, 6, 8, 9, 10)
+            hls_keys = universal_keys + [2, 6, 8, 9, 10]
+            for k in hls_keys:
+                if k in full_colormap: active_colormap[k] = full_colormap[k]
+                if k in full_names: active_names[k] = full_names[k]
+        
+        elif is_s1:
+            # S1: Include Universal + Inundated Veg (3, 7, 12, 13, 15)
+            s1_keys = universal_keys + [3, 7, 12, 13, 15]
+            for k in s1_keys:
+                if k in full_colormap: active_colormap[k] = full_colormap[k]
+                if k in full_names: active_names[k] = full_names[k]
+        else:
+            # Fallback (include everything if unknown)
+            active_colormap = full_colormap
+            active_names = full_names
+
+        VALID_CLASSES = [0, 1, 2, 3]
+        MAX_CLASS_VALUE = 4
+
+        # Keep data as floats to avoid 'NaN to integer' errors
+        L = da_later.fillna(0)
+        E = da_early.fillna(0)
+        transition_code = L * MAX_CLASS_VALUE + E
+
+        # Create mask for impossible combinations (Partial <-> Veg)
+        impossible_mask = (transition_code == 11) | (transition_code == 14)
+        
+        # Mask invalid inputs (np.isin works with floats)
+        valid_input_mask = (np.isin(L, VALID_CLASSES) & np.isin(E, VALID_CLASSES))
+        
+        # Additional user-specified mask
+        masked_classes_list = [3, 7, 12]
+        user_mask = np.isin(transition_code, masked_classes_list)
+
+        # Keep if (Valid Input) AND (Not Impossible) AND (Not User Masked)
+        keep_pixel_mask = valid_input_mask & ~impossible_mask & ~user_mask
+
+        # Apply Logic: Mask invalid/impossible pixels to 'nd_float'
+        final_data_float = xr.where(
+            keep_pixel_mask,
+            transition_code,
+            nd_float
         )
 
-        # Convert the temporary GeoTIFF to a Cloud Optimized GeoTIFF (COG)
-        save_gtiff_as_cog(tmp_gtiff, out_path)
+        # Fill NaNs with nd_float 
+        final_data_float = final_data_float.fillna(nd_float)
 
-        # Clean up the temporary file
-        try:
+        # Convert to uint8
+        final_data = final_data_float.astype("uint8")
+
+        # Inherit Georeferencing
+        final_data.rio.write_crs(da_later.rio.crs, inplace=True)
+        final_data.rio.write_nodata(int(nd_float), encoded=True, inplace=True)
+
+        # Write Temp GeoTIFF
+        tmp_gtiff = out_path.with_suffix(".tmp.tif")
+        final_data.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True, dtype="uint8")
+
+        # Inject Colormap and Metadata
+        with rasterio.open(tmp_gtiff, 'r+') as dst:
+            dst.write_colormap(1, active_colormap)
+            tags = {f"CLASS_{k}": v for k, v in active_names.items()}
+            dst.update_tags(**tags)
+
+        # Convert to COG
+        save_gtiff_as_cog(tmp_gtiff, out_path)
+        try: 
             tmp_gtiff.unlink(missing_ok=True)
-        except Exception:
+        except: 
             pass
+
+        print(f"[INFO] Categorical difference written to {out_path}")
+
+
+def compute_and_write_difference_positive_change_only(
+    earlier_path: Path,
+    later_path: Path,
+    out_path: Path,
+):
+    """
+    Computes a binary 'Positive Change' (Water Gain) raster.
+    Agnostic to DSWx-S1 and DSWx-HLS (WTR and BWTR layers).
+
+    Logic (Assign 1 - Blue):
+      1. New Water: Not Water (0) -> Any Water Class (1, 2, 3)
+      2. Intensification: Partial/Veg Water (2, 3) -> Open Water (1)
+    
+    Logic (Assign 0 - White):
+      - All other valid transitions (e.g., 1->1, 1->0, 3->3).
+      
+    Logic (Assign 255 - NoData):
+      - If either input is NoData (255) or Masked (>= 250).
+      
+    Metadata:
+      - Embeds a colormap: 0=White, 1=Blue (0,0,200,255).
+      - Embeds CLASS names for QGIS/GDAL.
+    """
+    import rioxarray
+    import xarray as xr
+    import numpy as np
+    import rasterio
+
+    print(f"[INFO] Computing generalized positive change (gain) layer for {out_path.name}...")
+
+    # 1. Open rasters
+    # Open unmasked to handle raw integer values directly
+    da_later = rioxarray.open_rasterio(later_path, masked=False).squeeze()
+    da_early = rioxarray.open_rasterio(earlier_path, masked=False).squeeze()
+
+    # Define Groups
+    # Valid Water Classes across S1 and HLS WTR/BWTR:
+    # 1: Open Water (S1/HLS)
+    # 2: Partial Surface Water (HLS)
+    # 3: Inundated Vegetation (S1)
+    any_water = [1, 2, 3]
+    partial_or_veg = [2, 3]
+    open_water = 1
+    not_water = 0
+
+    # Create masks 
+    # Nodata/Masks: Values >= 250 are considered invalid/masked in all DSWx products for differencing purposes
+    #(250=HAND, 251=Layover, 252=Snow/Ice, 253=Cloud, 254=Ocean, 255=Fill)
+    mask_invalid = (da_early >= 250) | (da_later >= 250)
+
+    # Condition 1: New Water (0 -> 1, 2, 3)
+    cond_new_water = (da_early == not_water) & (np.isin(da_later, any_water))
+
+    # Condition 2: Intensification (2, 3 -> 1), Partial/Veg becoming Open Water
+    cond_intensification = (np.isin(da_early, partial_or_veg)) & (da_later == open_water)
+
+    # Combine Gain Conditions
+    mask_gain = cond_new_water | cond_intensification
+
+    # Create Output Array (uint8) initally all zeros
+    out_data = np.zeros_like(da_early.values, dtype="uint8")
+    
+    # Apply Water Gain (Set to 1)
+    out_data[mask_gain.values] = 1
+    
+    # Apply Nodata (Set to 255) - Overwrites any previous assignment
+    out_data[mask_invalid.values] = 255
+
+    # Wrap in xarray for CRS/Transform handling
+    da_out = xr.DataArray(
+        out_data,
+        coords=da_later.coords,
+        dims=da_later.dims,
+        attrs=da_later.attrs
+    )
+    da_out.rio.write_crs(da_later.rio.crs, inplace=True)
+    da_out.rio.write_nodata(255, inplace=True)
+
+    # Write to Temporary GeoTIFF
+    tmp_gtiff = out_path.with_suffix(".tmp.tif")
+    da_out.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True, dtype="uint8")
+
+    # Add a Colormap and Metadata
+    # Color 0: White (255, 255, 255, 255)
+    # Color 1: Blue  (0, 0, 200, 255)
+    custom_colormap = {
+        0: (255, 255, 255, 255),
+        1: (0, 0, 200, 255)
+    }
+
+    # Define class names for metadata
+    class_names = {
+        0: "No Change or Water Loss",
+        1: "Water Gain"
+    }
+
+    with rasterio.open(tmp_gtiff, 'r+') as dst:
+        dst.write_colormap(1, custom_colormap)
+        tags = {f"CLASS_{k}": v for k, v in class_names.items()}
+        dst.update_tags(**tags)
+
+    # Convert to COG
+    save_gtiff_as_cog(tmp_gtiff, out_path)
+
+    # Cleanup
+    try:
+        tmp_gtiff.unlink(missing_ok=True)
+    except:
+        pass
+
+    print(f"[INFO] Positive change difference written to {out_path}")
+    return
 
 
 def generate_products(
@@ -816,7 +986,7 @@ def generate_products(
     zoom_bbox,
     filter_date=None,
     reclassify_snow_ice=False,
-):
+    ):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     Granules are reprojected to the most common UTM zone present in the data for a given date.
@@ -833,7 +1003,6 @@ def generate_products(
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
-    import re
     from collections import defaultdict
     from rasterio.shutil import copy
     import opera_mosaic
@@ -1238,16 +1407,14 @@ def generate_products(
                             continue
 
                         # Name and path
-                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_diff.tif"
+                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_water_gain.tif"
                         diff_path = (mode_dir / "data") / diff_name
 
                         try:
-                            compute_and_write_difference(
+                            compute_and_write_difference_positive_change_only(
                                 earlier_path=early_info["path"],
                                 later_path=later_info["path"],
-                                out_path=diff_path,
-                                nodata_value=None,
-                                log=False
+                                out_path=diff_path
                             )
                             print(f"[INFO] Wrote diff COG: {diff_path}")
                             
@@ -1458,7 +1625,7 @@ def make_map(
     from pygmt.params import Box
     from pyproj import Geod
 
-    # Check whether the product is a difference product
+    # Determine date string for filename
     if is_difference:
         match = re.search(
             r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})_(\_\d+N|\_\d+S|\_EPSG\d+|\_Hash\d+)?(?:log-)?diff",
@@ -1479,8 +1646,8 @@ def make_map(
     try:
         # Reproject to WGS84 (into the temp file)
         gdal.Warp(
-            mosaic_wgs84,
-            mosaic_path,
+            str(mosaic_wgs84),
+            str(mosaic_path),
             dstSRS="EPSG:4326",
             resampleAlg="near",
             creationOptions=["COMPRESS=DEFLATE"],
@@ -1489,25 +1656,21 @@ def make_map(
         # Load mosaic from the temporary file
         grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
 
-        bounds = grd.rio.bounds()
-        
+        # Handle Nodata
         try:
             nodata_value = grd.rio.nodata
         except AttributeError:
-            print("[WARN] 'nodata' attribute not found. Defaulting to 255.")
             nodata_value = 255
+            
         if nodata_value is not None:
+            # Mask out nodata
             grd = grd.where(grd != nodata_value)
-        else:
-            print("[WARN] No nodata value found or set. Skipping nodata removal.")
 
         # Define region
         region = [bbox[2], bbox[3], bbox[0], bbox[1]]  # [xmin, xmax, ymin, ymax]
 
         # Define target aspect ratio
         target_aspect = 60 / 100
-
-        # Pad region to match target aspect ratio
         region_padded = expand_region_to_aspect(region, target_aspect)
 
         # Define projection
@@ -1517,11 +1680,9 @@ def make_map(
 
         # Create PyGMT figure
         fig = pygmt.Figure()
-
-        # Control map annotation font size
         pygmt.config(FONT_ANNOT="6p")
 
-        # Base coast layer (optional)
+        # Base coast layer
         fig.coast(
             region=region_padded,
             projection=projection,
@@ -1531,50 +1692,131 @@ def make_map(
             water="lightblue",
         )
 
-        # Make the map for difference products (if applicable)
+        # 'landslide' mode (RTC)
         if is_difference:
-            data_values = grd.values[~np.isnan(grd.values)]
-            if len(data_values) == 0:
-                print(
-                    f"[WARN] Difference product {mosaic_path} has no valid data after nodata removal. Skipping map generation."
+            is_log_diff = "_log-diff" in str(mosaic_path)
+            
+            # --- CASE A: CONTINUOUS SCALE (RTC / Landslide) ---
+            if is_log_diff:
+                data_values = grd.values[~np.isnan(grd.values)]
+                if len(data_values) == 0:
+                    print(f"[WARN] No valid data in {mosaic_path}")
+                    cleanup_temp_file(mosaic_wgs84)
+                    return None
+
+                p2, p98 = np.percentile(data_values, [2, 98])
+                symmetric_limit = max(abs(p2), abs(p98))
+                if symmetric_limit == 0: symmetric_limit = 1 
+                
+                p_min = -symmetric_limit
+                p_max = symmetric_limit
+                inc = (p_max - p_min) / 1000.0
+
+                cpt_name = "difference_cpt"
+                pygmt.makecpt(
+                    cmap="vik", series=[p_min, p_max, inc], output=cpt_name, continuous=True
                 )
-                cleanup_temp_file(mosaic_wgs84)  # Cleanup on exit point
-                return None  # Skip map generation
+                
+                fig.grdimage(
+                    grid=grd, region=region_padded, projection=projection,
+                    cmap=cpt_name, frame=["WSne", "xaf", "yaf"], nan_transparent=True
+                )
+                fig.colorbar(cmap=cpt_name, frame=["x+lNormalized backscatter difference (dB)"])
 
-            # Calculate the 2nd and 98th percentiles
-            p2, p98 = np.percentile(data_values, [2, 98])
+            # 'flood' mode (DSWx)
+            else:
+                # Check data range to determine if this is Binary Gain or Full Categorical
+                valid_vals = grd.values[~np.isnan(grd.values)]
+                max_val = valid_vals.max() if valid_vals.size > 0 else 0
 
-            # For difference products, ensure the color scale is symmetric around zero
-            symmetric_limit = max(abs(p2), abs(p98))
-            p_min = -symmetric_limit
-            p_max = symmetric_limit
+                # --- Sub-Case B1: Binary Positive Change (Max value is 1) ---
+                if max_val <= 1:
+                    cpt_path = maps_dir / "binary_gain.cpt"
+                    
+                    # Create Simple Blue/White CPT
+                    with open(cpt_path, "w") as f:
+                        # 0 -> White (Fully Transparent 100)
+                        f.write("0 255/255/255@100 1 255/255/255@100\n")
+                        # 1 -> Blue (Opaque 0)
+                        f.write("1 0/0/200@0 2 0/0/200@0\n")
+                        # Background/NaN
+                        f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
 
-            # Calculate increment for 1000 steps
-            inc = (p_max - p_min) / 1000.0
+                    fig.grdimage(
+                        grid=grd, region=region_padded, projection=projection,
+                        cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
+                    )
 
-            cpt_name = "difference_cpt"
+                    # Simple Legend
+                    legend_path = maps_dir / "binary_legend.txt"
+                    with open(legend_path, "w") as f:
+                        f.write("H 10p,Helvetica-Bold Water Change\n")
+                        f.write("D 0.2c 1p\n") 
+                        f.write("S 0.3c s 0.3c 0/0/200 0.25p 0.5c Water Gain\n")
+                    
+                    fig.legend(spec=str(legend_path), position="JBC+jTC+o0c/1.0c+w4c", box="+gwhite+p1p")
+                    
+                    # Cleanup
+                    try:
+                        os.remove(cpt_path)
+                        os.remove(legend_path)
+                    except: pass
 
-            # Use a good diverging colormap (e.g., 'vik' or 'balance')
-            pygmt.makecpt(
-                cmap="vik", series=[p_min, p_max, inc], output=cpt_name, continuous=True
-            )
+                # --- Sub-Case B2: Full Categorical (Max value > 1) ---
+                else:
+                    cpt_path = maps_dir / "categorical_diff.cpt"
+                    
+                    # Define color map for full 0-15 classes
+                    color_map = {
+                        # No Change (Black / Transparent for 0)
+                        0:  (255, 255, 255, 0),    5:  (0, 0, 0, 255),
+                        10: (0, 0, 0, 255),        15: (0, 0, 0, 255),
+                        
+                        # Losses (Red/Orange)
+                        1:  (200, 0, 0, 255),      2:  (255, 127, 80, 255),
+                        3:  (255, 165, 0, 255),    9:  (255, 200, 100, 255),
+                        13: (255, 200, 100, 255),
 
-            fig.grdimage(
-                grid=grd,
-                region=region_padded,
-                projection=projection,
-                cmap=cpt_name,
-                frame=["WSne", "xaf", "yaf"],
-                nan_transparent=True,
-            )
+                        # Gains (Blues)
+                        4:  (0, 0, 200, 255),      8:  (100, 149, 237, 255),
+                        12: (60, 179, 113, 255),   6:  (30, 144, 255, 255),
+                        7:  (30, 144, 255, 255)
+                    }
 
-            # Set the colorbar label based on the type of difference
-            if "_log-diff.tif" in str(mosaic_path):
-                cbar_label = "Normalized backscatter (@~g@~@-0@-) difference (dB)"
-            else:  # Regular difference
-                cbar_label = "Difference in water extent (unitless)"
+                    # Build valid CPT
+                    with open(cpt_path, "w") as f:
+                        for i in range(16):
+                            if i in color_map:
+                                r, g, b, a = color_map[i]
+                                transparency = int(100 * (1 - (a / 255.0)))
+                                f.write(f"{i} {r}/{g}/{b}@{transparency} {i+1} {r}/{g}/{b}@{transparency}\n")
+                            else:
+                                f.write(f"{i} 255/255/255@100 {i+1} 255/255/255@100\n")
+                        f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
+                    
+                    fig.grdimage(
+                        grid=grd, region=region_padded, projection=projection,
+                        cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
+                    )
 
-            fig.colorbar(cmap=cpt_name, frame=[f"x+l{cbar_label}"])
+                    # Full Legend
+                    legend_path = maps_dir / "categorical_legend.txt"
+                    with open(legend_path, "w") as f:
+                        f.write("H 10p,Helvetica-Bold Water Change Classes\n")
+                        f.write("D 0.2c 1p\n")
+                        f.write("S 0.3c s 0.3c 0/0/200 0.25p 0.5c Water Gain (Inundation)\n")
+                        f.write("S 0.3c s 0.3c 30/144/255 0.25p 0.5c Water Gain (Partial)\n")
+                        f.write("S 0.3c s 0.3c 200/0/0 0.25p 0.5c Water Loss (Drying)\n")
+                        f.write("S 0.3c s 0.3c 255/127/80 0.25p 0.5c Water Loss (Partial)\n")
+                        f.write("S 0.3c s 0.3c 0/0/0 0.25p 0.5c Stable Water\n")
+                        
+                    fig.legend(spec=str(legend_path), position="JBC+jTC+o0c/1.0c+w5c", box="+gwhite+p1p")
+                    
+                    try: 
+                        os.remove(cpt_path)
+                        os.remove(legend_path)
+                    except:
+                        pass
 
         # Add grid image (based on product/layer)
         elif short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "WTR":
