@@ -75,6 +75,33 @@ In this example, a filter data (`-fd`) of October 28, 2025 (coinciding with hurr
 python disaster.py -b 17.3 18.8 -78.6 -75.6 -m fire -o hurricane_melissa_Oct2025 -lt "Hurricane Melissa, Oct. 2025" -fd 2025-10-28
 ```
 
+### Running with Local Data
+
+You can process pre-downloaded OPERA GeoTIFFs stored on your local machine by using the `-ld` / `--local_dir` argument. When this flag is set, the tool skips the cloud search/download step and processes all valid files found in the specified directory.
+
+#### Basic Local Usage
+```bash
+python disaster.py -b 35 37 -115 -113 -ld /path/to/my/data -o LocalOutput -m flood -lt "Local Test"
+```
+
+**Note:** The bounding box (`-b`) is still required to define the map extent and master grid alignment.
+
+#### File Organization
+The tool scans recursively, so file organization does not matter. You can:
+* Dump all files into one folder.
+* Organize them by date (e.g., `data/20231005/`).
+* Organize them by product type.
+
+**Important:** The script relies on standard OPERA naming conventions (e.g., `OPERA_L3_DSWx-HLS_...`) to identify products, dates, and tile IDs. Renaming files arbitrarily may cause them to be skipped.
+
+#### Supporting Advanced Features Locally
+To use features like **Snow/Ice Reclassification** or **Temporal Filtering** locally, you must ensure the required auxiliary files are present in the directory alongside the main data files. The script automatically pairs them based on the Tile ID and Date.
+
+* **Snow/Ice Reclassification (`-rc`):** Requires the `_CONF` layer file (e.g., `..._B03_CONF.tif`) for DSWx-HLS products.
+* **Fire/Disturbance Filtering (`-fd`):** Requires the `VEG-DIST-DATE` (e.g., `..._VEG-DIST-DATE.tif`) and `VEG-DIST-CONF` (e.g., `..._VEG-DIST-CONF.tif`) files.
+
+If auxiliary files are missing, the script will log a warning and proceed with standard processing (skipping the advanced step).
+
 ### Command-line Arguments
 
 | Argument             | Required | Description                                                                                   |
@@ -82,8 +109,9 @@ python disaster.py -b 17.3 18.8 -78.6 -75.6 -m fire -o hurricane_melissa_Oct2025
 | `-b`, `--bbox`        | Yes      | Bounding box: `South North West East` (space-separated floats) |
 | `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results |
 | `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, or `earthquake`|
-| `-d`, `--event-date`  | No       | Specifies the end date (YYYY-MM-DD) for the OPERA product search. The script will find the 'N' most recent products available on or before this date (where 'N' is set by --number-of-dates argument). Defaults to 'today'.|
-| `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`) |
+| `-ld`, `--local_dir`  | No       | Path to a local directory containing pre-downloaded OPERA GeoTIFFs. If provided, cloud search is skipped. |
+| `-d`, `--event-date`  | No       | Specifies the end date (YYYY-MM-DD) for the OPERA product search. The script will find the 'N' most recent products available on or before this date (where 'N' is set by --number-of-dates argument). Defaults to 'today'. (Ignored if `-ld` is used) |
+| `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`). (Ignored if `-ld` is used) |
 | `-lt`, `--layout_title` | Yes     | Title of PDF layout generated for each product |
 | `-fd`, `--filter_date` | No     | Date to use as filter in `fire` mode to remove all disturbance preceding `filter_date` |
 | `-rc`, `--reclassify_snow_ice` | No     | Flag to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. (Default: False)|
@@ -104,11 +132,11 @@ The `-m / --mode` argument determines which NASA OPERA products and data layers 
 For each valid product and date:
 - Mosaicked GeoTIFF file
 - Reprojected WGS84 version of the mosaic
-- Difference maps for water products for all available date pairs
+- Difference maps for water products for all available date pairs (Water gain for DSWx, Log-ratio for RTC)
 - Quicklook PNG map with legend and colorbar
 - Layout in PDF format including PNG map and explanation
 
-Products are organized in a timestamped subdirectory under your specified `--output_dir`.
+Products are organized in a timestamped subdirectory under your specified `--output_dir` (or directly in the output directory if running locally).
 
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request.
