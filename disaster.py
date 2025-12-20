@@ -196,16 +196,23 @@ def scan_local_directory(local_dir: Path):
     """
     import re
     
+    # Scan for all TIF files recursively
     tif_files = list(local_dir.rglob("*.tif"))
+    
+    # Check if directory is empty or has no TIFs
     if not tif_files:
-        raise FileNotFoundError(f"No .tif files found in {local_dir}")
+        print(f"[ERROR] No .tif files found in {local_dir}.")
+        print("       Please ensure your local directory contains valid OPERA GeoTIFF products.")
+        print("       The script expects files like: OPERA_L3_DSWx-HLS_..._WTR.tif")
+        # Returning empty DF causes main() to exit gracefully
+        return pd.DataFrame()
 
     print(f"[INFO] Scanning {len(tif_files)} local files in {local_dir}...")
 
     # Dictionary to hold grouped granule data
     granules = defaultdict(dict)
     
-    # Map filename prefixes to the official Dataset IDs used in the rest of the script.
+    # Map filename prefixes to OPERA Dataset IDs
     product_map = {
         "OPERA_L3_DSWX-HLS": "OPERA_L3_DSWX-HLS_V1",
         "OPERA_L3_DSWx-HLS": "OPERA_L3_DSWX-HLS_V1",
@@ -216,10 +223,12 @@ def scan_local_directory(local_dir: Path):
         "OPERA_L2_RTC-S1": "OPERA_L2_RTC-S1_V1",
     }
 
+    files_processed_count = 0
+
     for f in tif_files:
         name = f.name
         
-        # 1. Identify Product Type
+        # Identify Product Type
         prod_key = None
         for key in product_map.keys():
             if name.startswith(key):
@@ -227,17 +236,16 @@ def scan_local_directory(local_dir: Path):
                 break
         
         if not prod_key:
+            # Skip non-OPERA files
             continue
             
         dataset_name = product_map[prod_key]
 
-        # 2. Extract Date and Tile ID
+        # Extract Date and Tile ID
         parts = name.split('_')
         date_str = None
         tile_id = "UNKNOWN"
         
-        # Find the part that looks like a date (YYYYMMDDTHHMMSSZ)
-        # The Tile ID is almost always the part immediately preceding the date.
         for i, part in enumerate(parts):
             if re.match(r'\d{8}T\d{6}Z', part):
                 date_str = part
@@ -248,40 +256,59 @@ def scan_local_directory(local_dir: Path):
         if not date_str:
             continue
 
-        # 3. Extract Layer Suffix
-        layer_suffix = parts[-1].replace('.tif', '')
+        # Identify Layer Type
+        layer_col = None
         
-        if layer_suffix == "WTR" or layer_suffix.endswith("WTR"):
+        # DSWx Layers
+        if name.endswith("WTR.tif") and "BWTR" not in name:
             layer_col = "WTR"
-        elif layer_suffix == "BWTR" or layer_suffix.endswith("BWTR"):
+        elif name.endswith("BWTR.tif"):
             layer_col = "BWTR"
-        elif layer_suffix == "CONF" or layer_suffix.endswith("CONF"):
-            layer_col = "CONF"
-        elif "VEG-DIST-STATUS" in name:
-            layer_col = "VEG-DIST-STATUS"
+        elif name.endswith("CONF.tif") and "VEG-DIST" not in name:
+            layer_col = "CONF" # Captures ..._B03_CONF.tif
+            
+        # DIST Layers
         elif "VEG-ANOM-MAX" in name:
             layer_col = "VEG-ANOM-MAX"
+        elif "VEG-DIST-STATUS" in name:
+            layer_col = "VEG-DIST-STATUS"
         elif "VEG-DIST-DATE" in name:
             layer_col = "VEG-DIST-DATE"
         elif "VEG-DIST-CONF" in name:
             layer_col = "VEG-DIST-CONF"
-        elif "VV" in layer_suffix:
+            
+        # RTC Layers
+        elif name.endswith("_VV.tif"):
             layer_col = "RTC-VV"
-        elif "VH" in layer_suffix:
+        elif name.endswith("_VH.tif"):
             layer_col = "RTC-VH"
+            
+        # Fallback
         else:
-            layer_col = layer_suffix 
+            # Try to grab the last part before extension if it looks like a layer
+            suffix = parts[-1].replace('.tif', '')
+            if suffix.isupper(): 
+                layer_col = suffix
 
-        # 4. Group by (Dataset, Date, Tile_ID) to prevent overwriting different tiles with same timestamp
+        if not layer_col:
+            continue
+
+        # Group by Unique Key (Dataset, Date, Tile)
         group_key = (dataset_name, date_str, tile_id) 
         
-        granules[group_key][f"Download URL {layer_col}"] = str(f.absolute())
+        # Determine column name expected by generate_products()
+        # e.g., "Download URL WTR", "Download URL VEG-DIST-DATE"
+        col_name = f"Download URL {layer_col}"
+        
+        granules[group_key][col_name] = str(f.absolute())
         granules[group_key]["Start Time"] = date_str
         granules[group_key]["Dataset"] = dataset_name
+        
+        files_processed_count += 1
 
-    # Check if we found anything
+    # Final Check
     if not granules:
-        print(f"[ERROR] Found {len(tif_files)} files but none matched expected patterns.")
+        print(f"[ERROR] Found {len(tif_files)} files in {local_dir}, but none matched expected OPERA filename patterns.")
         return pd.DataFrame()
 
     # Convert to DataFrame
@@ -292,7 +319,7 @@ def scan_local_directory(local_dir: Path):
     df = pd.DataFrame(rows)
     df['Start Time'] = pd.to_datetime(df['Start Time'], format='%Y%m%dT%H%M%SZ', errors='coerce')
     
-    print(f"[INFO] Constructed local metadata DataFrame with {len(df)} granules.")
+    print(f"[INFO] Constructed local metadata DataFrame with {len(df)} unique granules (from {files_processed_count} files).")
     return df
 
 
@@ -2601,7 +2628,6 @@ def main():
     """
     args = parse_arguments()
 
-    # Terminate if user selects 'earthquake' mode
     if args.mode == "earthquake":
         print("[INFO] Earthquake mode coming soon. Exiting...")
         return
@@ -2609,16 +2635,14 @@ def main():
     if args.local_dir:
         print(f"[INFO] Running in LOCAL mode using data from: {args.local_dir}")
         
-        # Verify local dir exists
         if not args.local_dir.exists():
             print(f"[ERROR] Local directory {args.local_dir} does not exist.")
             return
 
-        # Scan directory and build metadata
+        # Scan directory
         df_opera = scan_local_directory(args.local_dir)
         
         if df_opera.empty:
-            print("[ERROR] No valid OPERA products found in local directory.")
             return
 
         # Prepare output directory
@@ -2627,36 +2651,28 @@ def main():
         make_output_dir(mode_dir)
 
     else:
+        # Cloud Logic
         print(f"[INFO] Running in CLOUD SEARCH mode.")
-        
         output_dir = next_pass.run_next_pass(
             bbox=args.bbox,
             number_of_dates=args.number_of_dates,
             date=args.date,
             functionality=args.functionality
         )
-
         make_output_dir(args.output_dir)
         dest = args.output_dir / output_dir.name
-        
-        # Move the next_pass output to the user specified output_dir (if they are different)
         if output_dir.resolve() != dest.resolve():
             output_dir.rename(dest)
-            print(f"[INFO] Moved next_pass output directory to {dest}")
             processing_dir = dest
         else:
             processing_dir = output_dir
-
-        # Read the metadata CSV file downloaded by next_pass
         df_opera = read_opera_metadata_csv(processing_dir)
-
-        # Make a new directory with the mode name
         mode_dir = processing_dir / args.mode
         make_output_dir(mode_dir)
 
     print(f"[INFO] Outputting results to: {mode_dir}")
 
-    # Generate products based on the mode
+    # Generate products
     generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.bbox, args.zoom_bbox, args.filter_date, args.reclassify_snow_ice)
 
     return
