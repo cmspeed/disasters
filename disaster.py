@@ -1470,10 +1470,15 @@ def generate_products(
                         colormap = opera_mosaic.get_image_colormap(DS[0])
                     except Exception:
                         colormap = None
-                    
+                
+                # Force float32 for RTC products to avoid Float64 rendering issues.
+                output_dtype = None
+                if short_name == "OPERA_L2_RTC-S1_V1":
+                    output_dtype = "float32"
+
                 # Mosaic the datasets using the appropriate method/rule
                 mosaic, _, nodata = opera_mosaic.mosaic_opera(all_warped_ds, product=short_name, merge_args={})
-                image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata)
+                image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata, dtype=output_dtype)
 
                 # Create filename and full paths
                 mosaic_name = f"{short_name}_{layer}_{date}_mosaic.tif"
@@ -2625,13 +2630,22 @@ def save_gtiff_as_cog(src_path: Path, dst_path: Path | None = None):
 def main():
     """
     Main entry point for the disaster analysis workflow.
+    This function parses command line arguments, sets up the output directory,
+    authenticates with Earthdata and ASF, and runs the next_pass module to generate
+    disaster products based on the specified mode (flood, fire, earthquake).
+    Raises:
+        Exception: If there are issues with directory creation, CSV reading, or product generation.
     """
+
     args = parse_arguments()
 
     if args.mode == "earthquake":
         print("[INFO] Earthquake mode coming soon. Exiting...")
         return
     
+    # Define the mode directory (e.g., output_dir/flood)
+    mode_dir = args.output_dir / args.mode
+
     if args.local_dir:
         print(f"[INFO] Running in LOCAL mode using data from: {args.local_dir}")
         
@@ -2645,9 +2659,8 @@ def main():
         if df_opera.empty:
             return
 
-        # Prepare output directory
+        # Ensure output directories exist
         make_output_dir(args.output_dir)
-        mode_dir = args.output_dir / args.mode
         make_output_dir(mode_dir)
 
     else:
@@ -2659,21 +2672,38 @@ def main():
             date=args.date,
             functionality=args.functionality
         )
+        
         make_output_dir(args.output_dir)
         dest = args.output_dir / output_dir.name
+        
         if output_dir.resolve() != dest.resolve():
-            output_dir.rename(dest)
-            processing_dir = dest
+            if not dest.exists():
+                output_dir.rename(dest)
+                processing_dir = dest
+            else:
+                print(f"[WARN] Destination {dest} already exists. Using existing folder.")
+                processing_dir = dest
         else:
             processing_dir = output_dir
+            
         df_opera = read_opera_metadata_csv(processing_dir)
-        mode_dir = processing_dir / args.mode
+        
+        # Ensure mode directory exists
         make_output_dir(mode_dir)
 
     print(f"[INFO] Outputting results to: {mode_dir}")
 
     # Generate products
-    generate_products(df_opera, args.mode, mode_dir, args.layout_title, args.bbox, args.zoom_bbox, args.filter_date, args.reclassify_snow_ice)
+    generate_products(
+        df_opera, 
+        args.mode, 
+        mode_dir, 
+        args.layout_title, 
+        args.bbox, 
+        args.zoom_bbox, 
+        args.filter_date, 
+        args.reclassify_snow_ice
+    )
 
     return
 
