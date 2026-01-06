@@ -56,9 +56,9 @@ python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire -lt "New Mexico Fire
 python disaster.py -b 48 49.5 -77.5 -74.4 -o QuebecFires -m fire -d 2023-07-31 -n 30 -lt "Quebec Wildfire, Summer 2023" -fd 2023-05-15
 ```
 
-#### Example: Generate landslide impact maps over a landslide in Brazil in February 2023
+#### Example: Generate landslide impact maps over a landslide in Brazil in February 2023, retaining only pixels with slopes greater than 15 degrees (slope filtering is optional)
 ```bash
-python disaster.py -b -24 -23.5 -45.75 -45.5 -o test_landslide_mode -m landslide -lt "Brazil Landslides, Feb. 2023" -fd 2023-02-01 -d 2023-03-01 -zb -23.783 -23.733 -45.733 -45.683
+python disaster.py -b -24 -23.5 -45.75 -45.5 -o brazil_landslides -m landslide -lt "Brazil Landslides, Feb. 2023" -fd 2023-02-01 -d 2023-03-01 -zb -23.783 -23.733 -45.733 -45.683 -st 15
 
 ```
 
@@ -108,14 +108,15 @@ If auxiliary files are missing, the script will log a warning and proceed with s
 |----------------------|----------|-----------------------------------------------------------------------------------------------|
 | `-b`, `--bbox`        | Yes      | Bounding box: `South North West East` (space-separated floats) |
 | `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results |
-| `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, or `earthquake`|
+| `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, `landslide`, or `earthquake`|
 | `-ld`, `--local_dir`  | No       | Path to a local directory containing pre-downloaded OPERA GeoTIFFs. If provided, cloud search is skipped. |
-| `-d`, `--event-date`  | No       | Specifies the end date (YYYY-MM-DD) for the OPERA product search. The script will find the 'N' most recent products available on or before this date (where 'N' is set by --number-of-dates argument). Defaults to 'today'. (Ignored if `-ld` is used) |
+| `-d`, `--date`        | No       | Specifies the end date (YYYY-MM-DD) for the OPERA product search. The script will find the 'N' most recent products available on or before this date. Defaults to 'today'. (Ignored if `-ld` is used) |
 | `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`). (Ignored if `-ld` is used) |
 | `-lt`, `--layout_title` | Yes     | Title of PDF layout generated for each product |
 | `-fd`, `--filter_date` | No     | Date to use as filter in `fire` mode to remove all disturbance preceding `filter_date` |
 | `-rc`, `--reclassify_snow_ice` | No     | Flag to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. (Default: False)|
-| `-zb`, `--zoom_box` | No     | Zoom bounding box: `South North West East` (space-separated floats) |
+| `-st`, `--slope_threshold` | No     | Specifies a slope threshold in degrees (0-100) to be used only in `landslide` mode. When set, the tool calculates a slope map using the DEM (Band 10) from available DSWx-HLS products. Pixels in the final mosaics (DIST and RTC) corresponding to slope values less than this threshold will be filtered out (set to nodata). This is useful for pinpointing potential landslide candidates. |
+| `-zb`, `--zoom_bbox`  | No     | Zoom bounding box: `South North West East` (space-separated floats) |
 
 ### Disaster Modes
 
