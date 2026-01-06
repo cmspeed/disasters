@@ -839,7 +839,10 @@ def compute_and_write_difference(
     # Landslide mode
     if log:
         # Compute log difference for RTC-S1
-        diff = 10 * np.log10(da_later / da_early)
+        L = da_later.where(da_later > 0)
+        E = da_early.where(da_early > 0)
+
+        diff = 10 * np.log10(L / E)
         diff = diff.astype("float32")
         print("[INFO] Computed log difference for RTC-S1.")
         
@@ -849,7 +852,8 @@ def compute_and_write_difference(
         # Handle Nodata
         input_nodata_mask = xr.where(da_later.isnull() | da_early.isnull(), True, False)
         result_nan_mask = np.isnan(diff)
-        final_nodata_mask = input_nodata_mask | result_nan_mask
+        result_inf_mask = np.isinf(diff)
+        final_nodata_mask = input_nodata_mask | result_nan_mask | result_inf_mask
 
         diff = xr.where(final_nodata_mask, nd, diff)
         diff.rio.write_nodata(nd, encoded=True, inplace=True)
