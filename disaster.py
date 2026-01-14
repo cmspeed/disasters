@@ -151,7 +151,24 @@ def parse_arguments():
         help="Flag to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. Default is False.",
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        "-st",
+        "--slope_threshold",
+        type=int,
+        metavar="DEG",
+        default=None,
+        required=False,
+        help="Slope threshold in degrees (0-100). Pixels with slope < threshold will be masked in Landslide mode.",
+    )
+
+    args = parser.parse_args()
+
+    # Ensure slope values are between 0 and 100 degrees, if provided
+    if args.slope_threshold is not None:
+        if not (0 <= args.slope_threshold <= 100):
+            parser.error("Slope threshold must be between 0 and 100.")
+
+    return args
 
 
 def authenticate():
@@ -1127,6 +1144,103 @@ def compute_and_write_difference_positive_change_only(
     return
 
 
+def process_dem_and_slope(df, master_grid, threshold, output_dir):
+    """
+    Fetches all DSWx-HLS Band 10 URLs and mosaics them into 'dem.tif' saved at output_dir.
+    Calculates slope and returns a boolean mask (True where slope < threshold).
+    """
+    print(f"[INFO] Processing DEM and Slope Mask (Threshold: {threshold} deg)...")
+
+    # Filter for ALL DSWx-HLS products to get DEMs
+    dswx_rows = df[df['Dataset'] == 'OPERA_L3_DSWX-HLS_V1']
+    
+    # Check if any DSWx-HLS products are available to generate the DEM mosaic. Return None if not.
+    # Slope filtering is skipped, and products are still generated downstream.
+    if dswx_rows.empty:
+        print("[WARN] No DSWx-HLS products found. Cannot generate DEM or slope mask.")
+        return None
+
+    # Construct Band 10 DEM URLs
+    dem_urls = []
+    # Drop duplicates to avoid downloading/warping the same granule twice
+    for url in dswx_rows['Download URL WTR'].dropna().unique():
+        if '_B01_WTR' in url:
+            # Replace WTR with DEM band
+            dem_url = url.replace('_B01_WTR', '_B10_DEM')
+            
+            # Prefix for GDAL vsicurl
+            if dem_url.startswith('http') and not dem_url.startswith('/vsi'):
+                dem_urls.append(f'/vsicurl/{dem_url}')
+            else:
+                dem_urls.append(dem_url)
+    
+    if not dem_urls:
+        print("[WARN] Could not construct Band 10 URLs.")
+        return None
+
+    # Extract Master Grid Properties
+    height, width = master_grid['shape'] 
+    transform = master_grid['transform']
+    
+    # Calculate bounds (minX, minY, maxX, maxY)
+    min_x = transform.c
+    max_y = transform.f
+    max_x = min_x + (transform.a * width)
+    min_y = max_y + (transform.e * height)
+    
+    output_bounds = [min_x, min_y, max_x, max_y]
+    dst_crs = master_grid.get('dst_crs')
+
+    # Define output path for the DEM and slope tifs
+    dem_output_path = output_dir / "dem.tif"
+    slope_output_path = output_dir / "slope.tif"
+
+    try:
+        # Warp DEMs to Disk (dem.tif), matching the master grid resolution and bounds
+        warp_options = gdal.WarpOptions(
+            format='GTiff',
+            outputBounds=output_bounds,
+            width=width,
+            height=height,
+            dstSRS=dst_crs,
+            resampleAlg='bilinear',
+            dstNodata=-9999
+        )
+        
+        print(f"[INFO] Writing DEM mosaic to: {dem_output_path}")
+        dem_ds = gdal.Warp(str(dem_output_path), dem_urls, options=warp_options)
+        
+        if dem_ds is None:
+            print("[WARN] DEM Warp failed.")
+            return None
+
+        # Calculate Slope (In-Memory from the DEM dataset we just created)
+        slope_options = gdal.DEMProcessingOptions(
+            format='GTiff', 
+            computeEdges=True,
+            slopeFormat='degree'
+        )
+        
+        # Compute and write slope to slope.tif
+        slope_ds = gdal.DEMProcessing(str(slope_output_path), dem_ds, 'slope', options=slope_options)
+        slope_arr = slope_ds.ReadAsArray()
+        
+        # Create Mask: True where slope < threshold (and valid data)
+        mask = (slope_arr < threshold) & (slope_arr != -9999)
+        
+        print(f"[INFO] Slope mask generated. Masking {np.sum(mask)} pixels < {threshold}°.")
+        
+        # Clean up GDAL handles
+        dem_ds = None 
+        slope_ds = None
+        
+        return mask
+
+    except Exception as e:
+        print(f"[WARN] Slope processing failed: {e}")
+        return None
+
+
 def generate_products(
     df_opera,
     mode,
@@ -1136,6 +1250,7 @@ def generate_products(
     zoom_bbox,
     filter_date=None,
     reclassify_snow_ice=False,
+    slope_threshold=None,
     ):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
@@ -1150,6 +1265,7 @@ def generate_products(
         zoom_bbox (list): Optional bounding box for the zoom-in inset map in the form [South, North, West, East].
         filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' and 'landslide' mode.
         reclassify_snow_ice (bool, optional): Whether to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. Default is False.
+        slope_threshold (int, optional): Slope threshold in degrees for masking in 'landslide' mode. If None, no slope masking is applied.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
@@ -1184,6 +1300,17 @@ def generate_products(
     # Define the master grid properties
     master_grid = get_master_grid_props(bbox, target_crs_proj4, target_res=target_res)
     
+    # Generate Slope Mask if requested
+    global_slope_mask = None
+    if mode == "landslide" and slope_threshold is not None:
+        # We pass data_dir so dem.tif is saved alongside other data products
+        global_slope_mask = process_dem_and_slope(
+            df_opera, 
+            master_grid, 
+            slope_threshold, 
+            data_dir 
+        )
+
     # Define the resampling method.
     if mode == "landslide":
         resampling_method = Resampling.bilinear
@@ -1482,6 +1609,16 @@ def generate_products(
 
                 # Mosaic the datasets using the appropriate method/rule
                 mosaic, _, nodata = opera_mosaic.mosaic_opera(all_warped_ds, product=short_name, merge_args={})
+
+                # Apply slope mask if it has been generated previously
+                if global_slope_mask is not None:
+                    # Ensure shape compatibility
+                    if mosaic.shape[-2:] == global_slope_mask.shape:
+                        # Set pixels with slope < threshold to nodata
+                        mosaic.values[..., global_slope_mask] = nodata
+                    else:
+                        print(f"[WARN] Mask shape {global_slope_mask.shape} mismatches mosaic {mosaic.shape}. Skipping slope filter.")
+
                 image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata, dtype=output_dtype)
 
                 # Create filename and full paths
@@ -2706,7 +2843,8 @@ def main():
         args.bbox, 
         args.zoom_bbox, 
         args.filter_date, 
-        args.reclassify_snow_ice
+        args.reclassify_snow_ice,
+        slope_threshold=args.slope_threshold
     )
 
     return
