@@ -200,6 +200,7 @@ def authenticate():
         GDAL_HTTP_COOKIEJAR=os.path.expanduser("~/cookies.txt"),
     )
     rio_env.__enter__()
+
     # Parse credentials from the netrc file for ASF access
     netrc_file = Path.home() / ".netrc"
     auths = netrc.netrc(netrc_file)
@@ -222,7 +223,7 @@ def scan_local_directory(local_dir: Path):
         print(f"[ERROR] No .tif files found in {local_dir}.")
         print("       Please ensure your local directory contains valid OPERA GeoTIFF products.")
         print("       The script expects files like: OPERA_L3_DSWx-HLS_..._WTR.tif")
-        # Returning empty DF causes main() to exit gracefully
+        # Returning empty DF causes main() to exit
         return pd.DataFrame()
 
     print(f"[INFO] Scanning {len(tif_files)} local files in {local_dir}...")
@@ -246,7 +247,7 @@ def scan_local_directory(local_dir: Path):
     for f in tif_files:
         name = f.name
         
-        # Identify Product Type
+        # Identify product type
         prod_key = None
         for key in product_map.keys():
             if name.startswith(key):
@@ -274,10 +275,10 @@ def scan_local_directory(local_dir: Path):
         if not date_str:
             continue
 
-        # Identify Layer Type
+        # Identify layer type
         layer_col = None
         
-        # DSWx Layers
+        # DSWx layers
         if name.endswith("WTR.tif") and "BWTR" not in name:
             layer_col = "WTR"
         elif name.endswith("BWTR.tif"):
@@ -285,7 +286,7 @@ def scan_local_directory(local_dir: Path):
         elif name.endswith("CONF.tif") and "VEG-DIST" not in name:
             layer_col = "CONF" # Captures ..._B03_CONF.tif
             
-        # DIST Layers
+        # DIST layers
         elif "VEG-ANOM-MAX" in name:
             layer_col = "VEG-ANOM-MAX"
         elif "VEG-DIST-STATUS" in name:
@@ -295,7 +296,7 @@ def scan_local_directory(local_dir: Path):
         elif "VEG-DIST-CONF" in name:
             layer_col = "VEG-DIST-CONF"
             
-        # RTC Layers
+        # RTC layers
         elif name.endswith("_VV.tif"):
             layer_col = "RTC-VV"
         elif name.endswith("_VH.tif"):
@@ -324,7 +325,7 @@ def scan_local_directory(local_dir: Path):
         
         files_processed_count += 1
 
-    # Final Check
+    # Final check
     if not granules:
         print(f"[ERROR] Found {len(tif_files)} files in {local_dir}, but none matched expected OPERA filename patterns.")
         return pd.DataFrame()
@@ -466,7 +467,7 @@ def get_master_crs(df_opera, mode):
     if not crs_counter:
         raise RuntimeError("Could not determine CRS from any granules.")
 
-    # Get the winner
+    # Get the most common CRS
     most_common_crs_str, count = crs_counter.most_common(1)[0]
     
     # Convert to PROJ4 string for consistency
@@ -520,8 +521,6 @@ def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
     height = int((ymax - ymin) / target_res)
 
     # Create the GDAL/Rasterio Affine transform
-    # (top-left x, x-res, x-skew, top-left y, y-skew, y-res)
-    # Note that y-res is negative
     transform = Affine.translation(xmin, ymax) * Affine.scale(target_res, -target_res)
 
     return {
@@ -1399,7 +1398,7 @@ def generate_products(
                     # Determine unique PassID from the earliest time in the cluster
                     # Format: YYYYMMDDtHHMM (e.g., 20241010t0019)
                     start_time_min = cluster_df["Start Time"].min()
-                    pass_id = start_time_min.strftime("%Y%m%dt%H%M")
+                    pass_id = start_time_min.strftime("%Y%m%dT%H%M")
                     
                     urls = cluster_df[url_column].dropna().tolist()
                     if not urls:
