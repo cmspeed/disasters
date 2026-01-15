@@ -13,6 +13,7 @@ import rasterio
 import rioxarray
 import xarray as xr
 from osgeo import gdal
+import re
 
 
 def parse_arguments():
@@ -199,6 +200,7 @@ def authenticate():
         GDAL_HTTP_COOKIEJAR=os.path.expanduser("~/cookies.txt"),
     )
     rio_env.__enter__()
+
     # Parse credentials from the netrc file for ASF access
     netrc_file = Path.home() / ".netrc"
     auths = netrc.netrc(netrc_file)
@@ -221,7 +223,7 @@ def scan_local_directory(local_dir: Path):
         print(f"[ERROR] No .tif files found in {local_dir}.")
         print("       Please ensure your local directory contains valid OPERA GeoTIFF products.")
         print("       The script expects files like: OPERA_L3_DSWx-HLS_..._WTR.tif")
-        # Returning empty DF causes main() to exit gracefully
+        # Returning empty DF causes main() to exit
         return pd.DataFrame()
 
     print(f"[INFO] Scanning {len(tif_files)} local files in {local_dir}...")
@@ -245,7 +247,7 @@ def scan_local_directory(local_dir: Path):
     for f in tif_files:
         name = f.name
         
-        # Identify Product Type
+        # Identify product type
         prod_key = None
         for key in product_map.keys():
             if name.startswith(key):
@@ -273,10 +275,10 @@ def scan_local_directory(local_dir: Path):
         if not date_str:
             continue
 
-        # Identify Layer Type
+        # Identify layer type
         layer_col = None
         
-        # DSWx Layers
+        # DSWx layers
         if name.endswith("WTR.tif") and "BWTR" not in name:
             layer_col = "WTR"
         elif name.endswith("BWTR.tif"):
@@ -284,7 +286,7 @@ def scan_local_directory(local_dir: Path):
         elif name.endswith("CONF.tif") and "VEG-DIST" not in name:
             layer_col = "CONF" # Captures ..._B03_CONF.tif
             
-        # DIST Layers
+        # DIST layers
         elif "VEG-ANOM-MAX" in name:
             layer_col = "VEG-ANOM-MAX"
         elif "VEG-DIST-STATUS" in name:
@@ -294,7 +296,7 @@ def scan_local_directory(local_dir: Path):
         elif "VEG-DIST-CONF" in name:
             layer_col = "VEG-DIST-CONF"
             
-        # RTC Layers
+        # RTC layers
         elif name.endswith("_VV.tif"):
             layer_col = "RTC-VV"
         elif name.endswith("_VH.tif"):
@@ -323,7 +325,7 @@ def scan_local_directory(local_dir: Path):
         
         files_processed_count += 1
 
-    # Final Check
+    # Final check
     if not granules:
         print(f"[ERROR] Found {len(tif_files)} files in {local_dir}, but none matched expected OPERA filename patterns.")
         return pd.DataFrame()
@@ -465,7 +467,7 @@ def get_master_crs(df_opera, mode):
     if not crs_counter:
         raise RuntimeError("Could not determine CRS from any granules.")
 
-    # Get the winner
+    # Get the most common CRS
     most_common_crs_str, count = crs_counter.most_common(1)[0]
     
     # Convert to PROJ4 string for consistency
@@ -519,8 +521,6 @@ def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
     height = int((ymax - ymin) / target_res)
 
     # Create the GDAL/Rasterio Affine transform
-    # (top-left x, x-res, x-skew, top-left y, y-skew, y-res)
-    # Note that y-res is negative
     transform = Affine.translation(xmin, ymax) * Affine.scale(target_res, -target_res)
 
     return {
@@ -1239,6 +1239,40 @@ def process_dem_and_slope(df, master_grid, threshold, output_dir):
     except Exception as e:
         print(f"[WARN] Slope processing failed: {e}")
         return None
+    
+    
+def cluster_by_time(df, time_col="Start Time", threshold_minutes=120):
+    """
+    Groups dataframe rows by time clustering to separate passes (e.g. Ascending vs Descending).
+    Returns a list of (group_id, dataframe_group) tuples.
+    """
+    df = df.sort_values(time_col)
+    groups = []
+    if df.empty:
+        return groups
+    
+    current_group = [df.iloc[0]]
+    
+    # Iterate through rows starting from the second one
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        prev_row = df.iloc[i-1]
+        
+        # Calculate time difference in minutes
+        time_diff = (row[time_col] - prev_row[time_col]).total_seconds() / 60
+        
+        if time_diff <= threshold_minutes:
+            current_group.append(row)
+        else:
+            # Finalize previous group and start a new one
+            groups.append(pd.DataFrame(current_group))
+            current_group = [row]
+    
+    # Append the last group
+    if current_group:
+        groups.append(pd.DataFrame(current_group))
+        
+    return groups
 
 
 def generate_products(
@@ -1337,6 +1371,7 @@ def generate_products(
     unique_dates.sort()
 
     # Create an index of mosaics created for use in pair-wise differencing
+    # Key is now the unique PassID (YYYYMMDDtHHMM)
     mosaic_index = defaultdict(lambda: defaultdict(dict))
 
     for date in unique_dates:
@@ -1348,322 +1383,246 @@ def generate_products(
             if df_sn.empty:
                 continue
 
+            # Cluster granules by time to separate Ascending/Descending passes
+            # Threshold: 120 minutes (2 hours). Passes are typically >10 hours apart.
+            time_clusters = cluster_by_time(df_sn, time_col="Start Time", threshold_minutes=120)
+
             for layer in layer_names:
                 url_column = f"Download URL {layer}"
                 if url_column not in df_sn.columns:
                     continue
+                
+                # Iterate through each clustered "pass" for this date
+                for cluster_df in time_clusters:
+                    
+                    # Determine unique PassID from the earliest time in the cluster
+                    # Format: YYYYMMDDtHHMM (e.g., 20241010t0019)
+                    start_time_min = cluster_df["Start Time"].min()
+                    pass_id = start_time_min.strftime("%Y%m%dT%H%M")
+                    
+                    urls = cluster_df[url_column].dropna().tolist()
+                    if not urls:
+                        continue
 
-                urls = df_sn[url_column].dropna().tolist()
-                if not urls:
-                    continue
+                    print(f"[INFO] Processing {short_name} - {layer} for pass {pass_id} (Date: {date})")
+                    print(f"[INFO] Found {len(urls)} URLs for this pass")
 
-                print(f"[INFO] Processing {short_name} - {layer} on {date}")
-                print(f"[INFO] Found {len(urls)} URLs")
+                    layout_date = ""
+                    DS, conf_DS, date_DS = None, None, None
 
-                layout_date = ""
-                DS, conf_DS, date_DS = None, None, None
-
-                if mode == "fire":
-                    date_column = "Download URL VEG-DIST-DATE"
-                    conf_column = "Download URL VEG-DIST-CONF"
-                    date_layer_links = (
-                        df_sn[date_column].dropna().tolist()
-                        if date_column in df_sn.columns
-                        else []
-                    )
-                    conf_layer_links = (
-                        df_sn[conf_column].dropna().tolist()
-                        if conf_column in df_sn.columns
-                        else []
-                    )
-                    if not date_layer_links:
-                        print(
-                            f"[WARN] No VEG-DIST-DATE URLs found for {short_name} on {date}"
-                        )
-                    else:
-                        print(
-                            f"[INFO] Found {len(date_layer_links)} VEG-DIST-DATE URLs"
-                        )
-                    if not conf_layer_links:
-                        print(
-                            f"[WARN] No VEG-DIST-CONF URLs found for {short_name} on {date}"
-                        )
-                    else:
-                        print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
-                    DS, date_DS, conf_DS = compile_and_load_data(
-                        urls,
-                        mode,
-                        conf_layer_links=conf_layer_links,
-                        date_layer_links=date_layer_links,
-                    )
-                    if filter_date:
-                        date_threshold = compute_date_threshold(filter_date)
-                        layout_date = str(filter_date)
-                        print(
-                            f"[INFO] date_threshold set to {date_threshold} for filter_date {filter_date}"
-                        )
-                    else:
-                        date_threshold = 0
-                        layout_date = "All Dates"
-                        print(
-                            f"[INFO] date_threshold set to {date_threshold} for filter_date {filter_date}"
-                        )
-
-                elif mode == "landslide":
-                    if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
+                    if mode == "fire":
                         date_column = "Download URL VEG-DIST-DATE"
                         conf_column = "Download URL VEG-DIST-CONF"
                         date_layer_links = (
-                            df_sn[date_column].dropna().tolist()
-                            if date_column in df_sn.columns
+                            cluster_df[date_column].dropna().tolist()
+                            if date_column in cluster_df.columns
                             else []
                         )
                         conf_layer_links = (
-                            df_sn[conf_column].dropna().tolist()
-                            if conf_column in df_sn.columns
+                            cluster_df[conf_column].dropna().tolist()
+                            if conf_column in cluster_df.columns
                             else []
                         )
-                        if not date_layer_links:
-                            print(
-                                f"[WARN] No VEG-DIST-DATE URLs found for {short_name} on {date}"
-                            )
-                        else:
-                            print(
-                                f"[INFO] Found {len(date_layer_links)} VEG-DIST-DATE URLs"
-                            )
-                        if not conf_layer_links:
-                            print(
-                                f"[WARN] No VEG-DIST-CONF URLs found for {short_name} on {date}"
-                            )
-                        else:
-                            print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
                         DS, date_DS, conf_DS = compile_and_load_data(
                             urls,
                             mode,
                             conf_layer_links=conf_layer_links,
                             date_layer_links=date_layer_links,
                         )
-
                         if filter_date:
                             date_threshold = compute_date_threshold(filter_date)
                             layout_date = str(filter_date)
-                            print(
-                                f"[INFO] date_threshold set to {date_threshold} for filter_date {filter_date}"
-                            )
                         else:
                             date_threshold = 0
                             layout_date = "All Dates"
-                            print(
-                                f"[INFO] date_threshold set to {date_threshold} for filter_date {filter_date}"
+
+                    elif mode == "landslide":
+                        if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
+                            date_column = "Download URL VEG-DIST-DATE"
+                            conf_column = "Download URL VEG-DIST-CONF"
+                            date_layer_links = (
+                                cluster_df[date_column].dropna().tolist()
+                                if date_column in cluster_df.columns
+                                else []
+                            )
+                            conf_layer_links = (
+                                cluster_df[conf_column].dropna().tolist()
+                                if conf_column in cluster_df.columns
+                                else []
+                            )
+                            DS, date_DS, conf_DS = compile_and_load_data(
+                                urls,
+                                mode,
+                                conf_layer_links=conf_layer_links,
+                                date_layer_links=date_layer_links,
                             )
 
-                    elif short_name == "OPERA_L2_RTC-S1_V1":
-                        DS = compile_and_load_data(urls, mode)
+                            if filter_date:
+                                date_threshold = compute_date_threshold(filter_date)
+                                layout_date = str(filter_date)
+                            else:
+                                date_threshold = 0
+                                layout_date = "All Dates"
 
-                elif mode == "flood":
-                    conf_column = "Download URL CONF"
-                    conf_layer_links = (
-                        df_sn[conf_column].dropna().tolist()
-                        if conf_column in df_sn.columns
-                        else []
-                    )
-                    if not conf_layer_links:
-                        print(f"[WARN] No CONF URLs found for {short_name} on {date}")
-                        conf_DS = None
-                        DS = compile_and_load_data(urls, mode)
-                    else:
-                        print(f"[INFO] Found {len(conf_layer_links)} CONF URLs")
-                        DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
-
-                # Group loaded DataArrays by CRS (UTM Zone)
-                crs_groups = defaultdict(list)
-                conf_groups = defaultdict(list)
-                date_groups = defaultdict(list)
-
-                # Ensure all lists are non-empty before zipping
-                if not DS:
-                    print(
-                        f"[WARN] No datasets loaded for {short_name} - {layer} on {date}. Skipping."
-                    )
-                    continue
-
-                # Determine auxiliary list lengths for zipping
-                aux_lists = []
-                if conf_DS is not None and mode == "flood":
-                    aux_lists.append(conf_DS)
-                elif conf_DS is not None and mode in ["fire", "landslide"]:
-                    aux_lists.extend([date_DS, conf_DS])
-
-                if aux_lists:
-                    # Zip DS with auxiliary layers (conf_DS, date_DS)
-                    for i, (da_data, *aux_data) in enumerate(zip(DS, *aux_lists)):
-                        try:
-                            crs_str = str(da_data.rio.crs)
-                        except AttributeError:
-                            print(f"[WARN] Granule {i} missing CRS metadata. Skipping.")
-                            continue
-
-                        crs_groups[crs_str].append(da_data)
-                        if mode == "flood":
-                            conf_groups[crs_str].append(aux_data[0])
-                        elif mode in ["fire", "landslide"] and short_name.startswith(
-                            "OPERA_L3_DIST"
-                        ):
-                            date_groups[crs_str].append(aux_data[0])
-                            conf_groups[crs_str].append(aux_data[1])
-                else:
-                    # Only DS is present (e.g., RTC-S1)
-                    for i, da_data in enumerate(DS):
-                        try:
-                            crs_str = str(da_data.rio.crs)
-                        except AttributeError:
-                            print(f"[WARN] Granule {i} missing CRS metadata. Skipping.")
-                            continue
-                        crs_groups[crs_str].append(da_data)
-
-                # These lists will hold the in-memory warped xarray objects
-                all_warped_ds = []
-                colormap = None # Grab colormap during filtering for use in final mosaic
-
-                # Iterate through each CRS group to process, then warp to the master grid
-                for crs_str, ds_group in crs_groups.items():
-                    print(f"[INFO] Processing and Warping {len(ds_group)} granules from {crs_str}...")
-                    current_conf_DS = conf_groups.get(crs_str)
-                    current_date_DS = date_groups.get(crs_str)
-
-                    colormap = None  # Initialize colormap
-
-                    # Filtering/Reclassification (Per CRS Group)
-                    if mode == "fire" or (
-                        mode == "landslide" and short_name.startswith("OPERA_L3_DIST")
-                    ):
-                        # Filter DIST layers by date and confidence
-                        ds_group, colormap = filter_by_date_and_confidence(
-                            ds_group,
-                            current_date_DS,
-                            date_threshold,
-                            DS_conf=current_conf_DS,
-                            confidence_threshold=0,
-                            fill_value=None,
-                        )
+                        elif short_name == "OPERA_L2_RTC-S1_V1":
+                            DS = compile_and_load_data(urls, mode)
 
                     elif mode == "flood":
-                        if (
-                            reclassify_snow_ice == True
-                            and short_name == "OPERA_L3_DSWX-HLS_V1"
-                            and layer in ["BWTR", "WTR"]
-                        ):
-                            # Reclassify false snow/ice positives in DSWX-HLS only (if user-specified --reclassify_snow_ice True)
-                            if current_conf_DS is None:
-                                print(
-                                    f"[WARN] CONF layers not available; skipping snow/ice reclassification for {short_name} on {date}"
-                                )
-                            else:
-                                print(
-                                    f"[INFO] Reclassifying false snow/ice positives as water based on CONF layers"
-                                )
-                                ds_group, colormap = reclassify_snow_ice_as_water(
-                                    ds_group, current_conf_DS
-                                )
+                        conf_column = "Download URL CONF"
+                        conf_layer_links = (
+                            cluster_df[conf_column].dropna().tolist()
+                            if conf_column in cluster_df.columns
+                            else []
+                        )
+                        if not conf_layer_links:
+                            print(f"[WARN] No CONF URLs found for {short_name} on {pass_id}")
+                            conf_DS = None
+                            DS = compile_and_load_data(urls, mode)
                         else:
+                            DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
+
+                    # Group loaded DataArrays by CRS (UTM Zone)
+                    crs_groups = defaultdict(list)
+                    conf_groups = defaultdict(list)
+                    date_groups = defaultdict(list)
+
+                    if not DS:
+                        continue
+
+                    aux_lists = []
+                    if conf_DS is not None and mode == "flood":
+                        aux_lists.append(conf_DS)
+                    elif conf_DS is not None and mode in ["fire", "landslide"]:
+                        aux_lists.extend([date_DS, conf_DS])
+
+                    if aux_lists:
+                        for i, (da_data, *aux_data) in enumerate(zip(DS, *aux_lists)):
+                            try:
+                                crs_str = str(da_data.rio.crs)
+                            except AttributeError:
+                                continue
+                            crs_groups[crs_str].append(da_data)
+                            if mode == "flood":
+                                conf_groups[crs_str].append(aux_data[0])
+                            elif mode in ["fire", "landslide"] and short_name.startswith("OPERA_L3_DIST"):
+                                date_groups[crs_str].append(aux_data[0])
+                                conf_groups[crs_str].append(aux_data[1])
+                    else:
+                        for i, da_data in enumerate(DS):
+                            try:
+                                crs_str = str(da_data.rio.crs)
+                            except AttributeError:
+                                continue
+                            crs_groups[crs_str].append(da_data)
+
+                    all_warped_ds = []
+                    colormap = None 
+
+                    for crs_str, ds_group in crs_groups.items():
+                        current_conf_DS = conf_groups.get(crs_str)
+                        current_date_DS = date_groups.get(crs_str)
+
+                        colormap = None  
+
+                        # Filtering/Reclassification (Per CRS Group)
+                        if mode == "fire" or (
+                            mode == "landslide" and short_name.startswith("OPERA_L3_DIST")
+                        ):
+                            ds_group, colormap = filter_by_date_and_confidence(
+                                ds_group,
+                                current_date_DS,
+                                date_threshold,
+                                DS_conf=current_conf_DS,
+                                confidence_threshold=0,
+                                fill_value=None,
+                            )
+
+                        elif mode == "flood":
                             if (
                                 reclassify_snow_ice == True
-                                and short_name != "OPERA_L3_DSWX-HLS_V1"
+                                and short_name == "OPERA_L3_DSWX-HLS_V1"
+                                and layer in ["BWTR", "WTR"]
                             ):
-                                print(
-                                    f"[INFO] Snow/ice reclassification is only applicable to DSWx-HLS. Skipping for {short_name}."
-                                )
-                            else:
-                                print("[INFO] Snow/ice reclassification not requested; proceeding without reclassification.")
+                                if current_conf_DS is not None:
+                                    ds_group, colormap = reclassify_snow_ice_as_water(
+                                        ds_group, current_conf_DS
+                                    )
 
-                    # Reproject the processed granules to the master grid
-                    print(f"[INFO] Warping {len(ds_group)} main granules to master grid...")
-                    for da in ds_group:
-                        grid_props = master_grid.copy()
-                        dst_crs_val = grid_props.pop("dst_crs")
-                        da_warped = da.rio.reproject(
-                            dst_crs_val,
-                            **grid_props,
-                            resampling=resampling_method
-                        )
-                        all_warped_ds.append(da_warped)
-                
-                # Mosaic the warped granules
-                if not all_warped_ds:
-                    print(f"[WARN] No valid granules to mosaic for {short_name} - {layer} on {date}. Skipping.")
-                    continue
+                        # Reproject to master grid
+                        for da in ds_group:
+                            grid_props = master_grid.copy()
+                            dst_crs_val = grid_props.pop("dst_crs")
+                            da_warped = da.rio.reproject(
+                                dst_crs_val,
+                                **grid_props,
+                                resampling=resampling_method
+                            )
+                            all_warped_ds.append(da_warped)
                     
-                print(f"[INFO] Mosaicking {len(all_warped_ds)} total warped granules for {date}...")
+                    if not all_warped_ds:
+                        continue
+                        
+                    if colormap is None:
+                        try:
+                            colormap = opera_mosaic.get_image_colormap(DS[0])
+                        except Exception:
+                            colormap = None
+                    
+                    output_dtype = None
+                    if short_name == "OPERA_L2_RTC-S1_V1":
+                        output_dtype = "float32"
 
-                # Use pre-determined colormap or make another attempt to get it. If still None, proceed without it.
-                if colormap is None:
-                    try:
-                        colormap = opera_mosaic.get_image_colormap(DS[0])
-                    except Exception:
-                        colormap = None
-                
-                # Force float32 for RTC products to avoid Float64 rendering issues.
-                output_dtype = None
-                if short_name == "OPERA_L2_RTC-S1_V1":
-                    output_dtype = "float32"
+                    # Mosaic the datasets using the appropriate method/rule
+                    mosaic, _, nodata = opera_mosaic.mosaic_opera(all_warped_ds, product=short_name, merge_args={})
 
-                # Mosaic the datasets using the appropriate method/rule
-                mosaic, _, nodata = opera_mosaic.mosaic_opera(all_warped_ds, product=short_name, merge_args={})
+                    # Apply slope mask if it has been generated previously
+                    if global_slope_mask is not None:
+                        # Ensure shape compatibility
+                        if mosaic.shape[-2:] == global_slope_mask.shape:
+                            # Set pixels with slope < threshold to nodata
+                            mosaic.values[..., global_slope_mask] = nodata
+                        else:
+                            print(f"[WARN] Mask shape {global_slope_mask.shape} mismatches mosaic {mosaic.shape}. Skipping slope filter.")
 
-                # Apply slope mask if it has been generated previously
-                if global_slope_mask is not None:
-                    # Ensure shape compatibility
-                    if mosaic.shape[-2:] == global_slope_mask.shape:
-                        # Set pixels with slope < threshold to nodata
-                        mosaic.values[..., global_slope_mask] = nodata
-                    else:
-                        print(f"[WARN] Mask shape {global_slope_mask.shape} mismatches mosaic {mosaic.shape}. Skipping slope filter.")
+                    image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata, dtype=output_dtype)
+                    
+                    # Create filename and full paths using pass_id (YYYYMMDDtHHMM)
+                    mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
+                    mosaic_path = data_dir / mosaic_name
+                    tmp_path = data_dir / f"tmp_{mosaic_name}"
 
-                image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata, dtype=output_dtype)
+                    copy(image, tmp_path, driver="GTiff")
+                    save_gtiff_as_cog(tmp_path, mosaic_path)
+                    cleanup_temp_file(tmp_path)
 
-                # Create filename and full paths
-                mosaic_name = f"{short_name}_{layer}_{date}_mosaic.tif"
-                mosaic_path = data_dir / mosaic_name
-                tmp_path = data_dir / f"tmp_{mosaic_name}"
+                    mosaic_index[short_name][layer][pass_id] = {
+                        "path": mosaic_path,
+                        "crs": master_grid["dst_crs"] 
+                    }
 
-                # Save the mosaic to a temporary GeoTIFF
-                copy(image, tmp_path, driver="GTiff")
+                    # Make map (pass_id is passed as 'date' argument)
+                    map_name = make_map(
+                        maps_dir,
+                        mosaic_path,
+                        short_name,
+                        layer,
+                        pass_id,
+                        bbox,
+                        zoom_bbox,
+                        is_difference=False
+                    )
 
-                # Convert to COG (writes back into mosaic_path)
-                save_gtiff_as_cog(tmp_path, mosaic_path)
-                print(f"[INFO] Mosaic written as COG: {mosaic_path}")
-
-                # Remove temporary file
-                cleanup_temp_file(tmp_path)  # Cleanup on exit point
-
-                mosaic_index[short_name][layer][str(date)] = {
-                    "path": mosaic_path,
-                    "crs": master_grid["dst_crs"] # Store the master CRS string
-                }
-
-                # Make a map with PyGMT
-                map_name = make_map(
-                    maps_dir,
-                    mosaic_path,
-                    short_name,
-                    layer,
-                    date,
-                    bbox,
-                    zoom_bbox,
-                    is_difference=False
-                )
-
-                # Make a PDF layout
-                make_layout(
-                    layouts_dir,
-                    map_name,
-                    short_name,
-                    layer,
-                    date,
-                    layout_date,
-                    layout_title,
-                    reclassify_snow_ice
-                )
+                    # Make layout
+                    make_layout(
+                        layouts_dir,
+                        map_name,
+                        short_name,
+                        layer,
+                        pass_id,
+                        layout_date,
+                        layout_title,
+                        reclassify_snow_ice
+                    )
 
     # Pair-wise differencing for 'flood' mode
     if mode == "flood":
@@ -1673,9 +1632,9 @@ def generate_products(
         for short_name_k, layers_dict in mosaic_index.items():
             for layer_k, date_map in layers_dict.items():
 
+                # dates is now a list of sorted pass_ids (YYYYMMDDtHHMM)
                 dates = sorted(date_map.keys()) 
 
-                # Generate difference for all possible pairs
                 for i in range(len(dates)):
                     for j in range(i + 1, len(dates)):
                         d_early = dates[i]
@@ -1693,13 +1652,11 @@ def generate_products(
                                 "layer": layer_k,
                                 "date_earlier": d_early,
                                 "date_later": d_later,
-                                "crs_earlier": crs_a,
-                                "crs_later": crs_b,
-                                "reason": "Mosaics have different master CRS (this should not happen)"
+                                "reason": "Mosaics have different master CRS"
                             })
                             continue
 
-                        # Name and path
+                        # Name using pass IDs
                         diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_water_gain.tif"
                         diff_path = (mode_dir / "data") / diff_name
 
@@ -1711,14 +1668,12 @@ def generate_products(
                             )
                             print(f"[INFO] Wrote diff COG: {diff_path}")
                             
-                            # Make a map with PyGMT
-                            diff_date_str = f"{d_later}_{d_early}"
-                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
+                            diff_id_str = f"{d_later}_{d_early}"
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_id_str, bbox, zoom_bbox, is_difference=True)
 
-                            # Make a PDF layout
                             if map_name:
                                 diff_date_str_layout = f"{d_early}, {d_later}"
-                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_id_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
                         
                         except Exception as e:
                             skipped.append({
@@ -1727,32 +1682,25 @@ def generate_products(
                                 "date_earlier": d_early,
                                 "date_later": d_later,
                                 "error": str(e),
-                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
                             })
 
-        # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
         with open(report_path, "w") as f:
             json.dump(skipped, f, indent=2)
-        print(f"[INFO] Difference skip report: {report_path} ({len(skipped)} skipped)")
 
-    # Pair-wise differencing for 'landslide' mode (RTC-S1 log difference)
+    # Pair-wise differencing for 'landslide' mode
     if mode == "landslide":
-        print(
-            "[INFO] Computing pairwise log difference between RTC backscatter products..."
-        )
+        print("[INFO] Computing pairwise log difference between RTC backscatter products...")
         skipped = []
 
         for short_name_k, layers_dict in mosaic_index.items():
             for layer_k, date_map in layers_dict.items():
 
-                # Only compute log-diff for RTC products
                 if short_name_k != "OPERA_L2_RTC-S1_V1":
                     continue
                     
                 dates = sorted(date_map.keys())
 
-                # Generate difference for all possible pairs
                 for i in range(len(dates)):
                     for j in range(i + 1, len(dates)):
                         d_early = dates[i]
@@ -1761,23 +1709,9 @@ def generate_products(
                         early_info = date_map[d_early]
                         later_info = date_map[d_later]
 
-                        crs_a = early_info["crs"]
-                        crs_b = later_info["crs"]
-                        
-                        # Double check the CRS are identical
-                        if crs_a != crs_b:
-                            skipped.append({
-                                "short_name": short_name_k,
-                                "layer": layer_k,
-                                "date_earlier": d_early,
-                                "date_later": d_later,
-                                "crs_earlier": crs_a,
-                                "crs_later": crs_b,
-                                "reason": "Mosaics have different master CRS (this should not happen)"
-                            })
+                        if early_info["crs"] != later_info["crs"]:
                             continue
 
-                        # Name and path: REMOVED {UTM}
                         diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_log-diff.tif"
                         diff_path = (mode_dir / "data") / diff_name
                         
@@ -1791,32 +1725,25 @@ def generate_products(
                             )
                             print(f"[INFO] Wrote diff COG: {diff_path}")
                             
-                            # Make a map with PyGMT
-                            diff_date_str = f"{d_later}_{d_early}"
-                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_date_str, bbox, zoom_bbox, is_difference=True)
+                            diff_id_str = f"{d_later}_{d_early}"
+                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_id_str, bbox, zoom_bbox, is_difference=True)
 
-                            # Make a PDF layout
                             if map_name:
                                 diff_date_str_layout = f"{d_early}, {d_later}"
-                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_date_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
+                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_id_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
 
                         except Exception as e:
-                            skipped.append({
+                             skipped.append({
                                 "short_name": short_name_k,
                                 "layer": layer_k,
                                 "date_earlier": d_early,
                                 "date_later": d_later,
                                 "error": str(e),
-                                "reason": "no overlapping data values; both rasters contain only nodata in the overlap region."
                             })
 
-        # Report skipped pairs due to CRS/UTM differences or errors
         report_path = (mode_dir / "data") / "log-difference_skipped_pairs.json"
         with open(report_path, "w") as f:
             json.dump(skipped, f, indent=2)
-        print(
-            f"[INFO] Log-difference skip report: {report_path} ({len(skipped)} skipped)"
-        )
     return
 
 
@@ -1900,7 +1827,7 @@ def make_map(
         mosaic_path (Path): Path to the mosaic file.
         short_name (str): Short name of the product.
         layer (str): Layer name to be used in the map.
-        date (str): Date string in the format YYYY-MM-DD.
+        date (str): Date/PassID string.
         bbox (list): Bounding box in the form [South, North, West, East].
         zoom_bbox (list, optional): Bounding box for the zoom-in inset map, in the form [South, North, West, East].
         is_difference (bool, optional): Flag to indicate if the mosaic is a difference product. Defaults to False.
@@ -1918,10 +1845,22 @@ def make_map(
     from pygmt.params import Box
     from pyproj import Geod
 
+    # Helper to prettify pass IDs (YYYYMMDDtHHMM -> YYYY-MM-DD HH:MM)
+    def format_pass_id(pid):
+        # If it matches YYYYMMDDtHHMM
+        if re.match(r"\d{8}t\d{4}", pid):
+             return f"{pid[:4]}-{pid[4:6]}-{pid[6:8]} {pid[9:11]}:{pid[11:13]}"
+        # If it matches YYYY-MM-DD
+        if re.match(r"\d{4}-\d{2}-\d{2}", pid):
+            return pid
+        return pid
+
     # Determine date string for filename
     if is_difference:
+        # Update regex to support standard dates (YYYY-MM-DD) AND pass IDs (YYYYMMDDtHHMM)
+        # Groups: 1=Later, 2=Earlier
         match = re.search(
-            r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})_(\_\d+N|\_\d+S|\_EPSG\d+|\_Hash\d+)?(?:log-)?diff",
+            r"((?:\d{4}-\d{2}-\d{2})|(?:\d{8}t\d{4}))_((?:\d{4}-\d{2}-\d{2})|(?:\d{8}t\d{4}))_(\_\d+N|\_\d+S|\_EPSG\d+|\_Hash\d+)?(?:log-)?diff",
             str(mosaic_path),
         )
         if match:
@@ -2405,7 +2344,7 @@ def make_map(
             )
 
         # Export map
-        map_name = maps_dir / f"{short_name}_{layer}_{date}_map.png"
+        map_name = maps_dir / f"{short_name}_{layer}_{date_str}_map.png"
         fig.savefig(map_name, dpi=900)
         cleanup_temp_file(mosaic_wgs84) 
 
@@ -2434,7 +2373,7 @@ def make_layout(
         map_name (Path): Path to the map image.
         short_name (str): Short name of the product.
         layer (str): Layer name to be used in the layout.
-        date (str): Date string in the format YYYY-MM-DD.
+        date (str): Date/PassID string.
         layout_date (str): Date threshold in the format YYYY-MM-DD.
         layout_title (str): Title for the layout.
         reclassify_snow_ice (bool, optional): Flag indicating if snow/ice reclassification was applied. Defaults to False.
@@ -2446,6 +2385,17 @@ def make_layout(
     import matplotlib.pyplot as plt
     from matplotlib.image import imread
     from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+
+    # Helper toprettify dates
+    def format_display_date(pid):
+        # Handle difference format: "YYYYMMDDtHHMM, YYYYMMDDtHHMM"
+        if ',' in pid:
+             parts = pid.split(',')
+             return f"{format_display_date(parts[0].strip())}, {format_display_date(parts[1].strip())}"
+        # Handle single PassID YYYYMMDDtHHMM
+        if re.match(r"\d{8}t\d{4}", pid):
+             return f"{pid[:4]}-{pid[4:6]}-{pid[6:8]} {pid[9:11]}:{pid[11:13]}"
+        return pid
 
     # Create blank figure
     fig, ax = plt.subplots(figsize=(11, 7.5))
@@ -2542,7 +2492,8 @@ def make_layout(
         )
         data_source = "Copernicus Sentinel-1"
 
-    acquisitions = f"{date}"
+    # Format date
+    acquisitions = format_display_date(str(date))
 
     data_sources = textwrap.dedent(
         f"""\
@@ -2725,7 +2676,6 @@ def make_layout(
 
     plt.tight_layout()
 
-    # layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
     layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
     return
