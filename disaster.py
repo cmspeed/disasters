@@ -211,7 +211,7 @@ def authenticate():
 def scan_local_directory(local_dir: Path):
     """
     Scans a local directory for OPERA Geotiffs, parses their filenames, 
-    and constructs a DataFrame mimicking the structure of 'opera_products_metadata.csv'.
+    and constructs a DataFrame mimicking the structure of 'opera_products_metadata.xls'.
     """
     import re
     
@@ -359,42 +359,47 @@ def make_output_dir(output_dir: Path):
     return
 
 
-def read_opera_metadata_csv(output_dir):
+def read_opera_metadata_excel(output_dir):
     """
-    Read the OPERA products metadata CSV file and clean the 'Start Time' column.
+    Read the OPERA products metadata Excel file and clean the 'Start Time' column.
 
     Args:
-        output_dir (Path): Path to the directory containing the CSV file.
+        output_dir (Path): Path to the directory containing the Excel file.
     Returns:
         pd.DataFrame: DataFrame with 'Start Time' as datetime64[ns].
     Raises:
-        FileNotFoundError: If the CSV file does not exist.
+        FileNotFoundError: If the Excel file does not exist.
     """
-    csv_path = Path(output_dir) / "opera_products_metadata.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV file not found at {csv_path}")
+    # Specify paht to opera_products_metadata.xlsx
+    excel_path = Path(output_dir) / "opera_products_metadata.xlsx"
+    
+    if not excel_path.exists():
+        raise FileNotFoundError(f"Excel file not found at {excel_path}")
 
-    # Read the CSV file into a Pandas DataFrame
-    df = pd.read_csv(csv_path)
+    # Read the Excel file into a Pandas DataFrame
+    df = pd.read_excel(excel_path)
 
-    # Define the two format strings (this is necessary as RTC has slightly different format)
+    # Define the two format strings (necessary as RTC has a slightly different format)
     FORMAT_MICROSECONDS = "%Y-%m-%dT%H:%M:%S.%fZ"  # For non-RTC data
-    FORMAT_SECONDS_ONLY = "%Y-%m-%dT%H:%M:%SZ"  # For RTC data
+    FORMAT_SECONDS_ONLY = "%Y-%m-%dT%H:%M:%SZ"     # For RTC data
+
+    # Ensure the column is treated as a string before parsing. 
+    start_times = df["Start Time"].astype(str)
 
     # Parse the non-RTC format (RTC dates become NaT)
     df_temp1 = pd.to_datetime(
-        df["Start Time"], format=FORMAT_MICROSECONDS, errors="coerce"
+        start_times, format=FORMAT_MICROSECONDS, errors="coerce"
     )
 
     # Parse the RTC format (Non-RTC dates become NaT)
     df_temp2 = pd.to_datetime(
-        df["Start Time"], format=FORMAT_SECONDS_ONLY, errors="coerce"
+        start_times, format=FORMAT_SECONDS_ONLY, errors="coerce"
     )
 
-    # Combine differently parsed datetimes into single column
+    # Combine differently parsed datetimes into a single column
     df["Start Time"] = df_temp1.combine_first(df_temp2)
 
-    print(f"[INFO] Loaded {len(df)} rows from {csv_path}")
+    print(f"[INFO] Loaded {len(df)} rows from {excel_path}")
 
     return df
 
@@ -2776,8 +2781,9 @@ def main():
                 processing_dir = dest
         else:
             processing_dir = output_dir
-            
-        df_opera = read_opera_metadata_csv(processing_dir)
+        
+        # Read OPERA metadata returned by next_pass
+        df_opera = read_opera_metadata_excel(processing_dir)
         
         # Ensure mode directory exists
         make_output_dir(mode_dir)
