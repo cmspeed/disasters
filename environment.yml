@@ -2,24 +2,29 @@ name: disasters
 channels:
   - conda-forge
 dependencies:
+  - python=3.12
+  - gdal=3.12
+  - libgdal=3.12
+  - numpy<2.0
   - asf_search
   - beautifulsoup4
   - boto3
   - earthaccess
-  - gdal
   - geopandas
   - jupyterlab
   - leafmap
   - lxml
   - matplotlib
-  - numpy
-  - opera-utils
+  - opera-utils=0.25.3
   - pip
   - pygmt
   - rasterio
   - rioxarray
   - tabulate
   - xarray
-  - zarr==3.1.3
+  - zarr
+  - openpyxl 
+  
   - pip:
-      - git+https://github.com/cmspeed/next_pass.git@update-rtc
+      - numpy<2.0
+      - git+https://github.com/OPERA-Cal-Val/next_pass.git@main
