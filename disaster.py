@@ -162,6 +162,12 @@ def parse_arguments():
         help="Slope threshold in degrees (0-100). Pixels with slope < threshold will be masked in Landslide mode.",
     )
 
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="If set, runs data loading in both sequential and concurrent modes to compare performance.",
+    )
+
     args = parser.parse_args()
 
     # Ensure slope values are between 0 and 100 degrees, if provided
@@ -535,27 +541,26 @@ def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
     }
 
 
-def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
+def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None, benchmark_stats=None):
     """
-    Compile and load data from the provided layer links for mosaicking.
-    If there are S1A and S1C-derived OPERA products over the same area on the same day, only the most common
-    (S1A or S1C) is used in the mosaicking.
+    Compile and load data from the provided layer links for mosaicking using multithreading.
     
     Args:
         data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
         conf_layer_links (list, optional): List of URLs for additional layers to filter false positives.
         date_layer_links (list, optional): List of URLs for date layers to filter by date.
+        benchmark_stats (dict, optional): Mutable dictionary to track benchmarking stats. 
+                                          If provided, enables benchmark mode.
     Returns:
         DS: List of rioxarray datasets loaded from the provided links (in granule order).
         conf_DS: List of rioxarray datasets for confidence layers (if applicable, in granule order).
         date_DS: List of rioxarray datasets for date layers (if applicable, in granule order).
-    Raises:
-        Exception: If there is an error loading any of the datasets.
     """
     import logging
+    import time
+    import concurrent.futures
     from collections import Counter
-
     from opera_utils.disp._remote import open_file
 
     logging.getLogger().setLevel(logging.ERROR)
@@ -598,37 +603,83 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
         if date_layer_links:
             date_layer_links = [link for i, link in enumerate(date_layer_links) if is_most_common[i]]
 
-    # Helper to load datasets
-    def load_datasets(links):
-        datasets = []
-        for link in links:
-            try:
-                datasets.append(rioxarray.open_rasterio(link, masked=False))
-            except Exception as e:
-                f = open_file(
-                    link,
-                    earthdata_username=username,
-                    earthdata_password=password,
-                )
-                datasets.append(rioxarray.open_rasterio(f, masked=False))
-        return datasets
+    # --- Loading Helpers ---
+
+    def _load_single(link):
+        """Helper to load a single dataset, handling auth fallback."""
+        try:
+            return rioxarray.open_rasterio(link, masked=False)
+        except Exception:
+            f = open_file(link, earthdata_username=username, earthdata_password=password)
+            return rioxarray.open_rasterio(f, masked=False)
+
+    def _run_sequential(links):
+        """Sequential loading for benchmarking."""
+        return [_load_single(link) for link in links]
+
+    def _run_concurrent(links):
+        """Concurrent loading using ThreadPoolExecutor."""
+        if not links:
+            return []
+        max_workers = min(20, len(links))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            return list(executor.map(_load_single, links))
+
+    def load_datasets(links, label="Dataset"):
+        """Orchestrates loading. If benchmark_stats is set, runs both and tracks cumulative stats."""
+        if not links:
+            return []
+            
+        if benchmark_stats is not None:
+            print(f"\n[BENCHMARK] Testing load speeds for {len(links)} items ({label})...")
+            
+            # 1. Run Sequential
+            t0 = time.time()
+            _ = _run_sequential(links)
+            t_seq = time.time() - t0
+            
+            # 2. Run Concurrent
+            t0 = time.time()
+            results = _run_concurrent(links)
+            t_conc = time.time() - t0
+            
+            # Update Globals
+            benchmark_stats['seq'] += t_seq
+            benchmark_stats['conc'] += t_conc
+            
+            # Calculate metrics
+            speedup = t_seq / t_conc if t_conc > 0 else 0
+            saved = t_seq - t_conc
+            
+            cum_seq = benchmark_stats['seq']
+            cum_conc = benchmark_stats['conc']
+            cum_saved = cum_seq - cum_conc
+            cum_speedup = cum_seq / cum_conc if cum_conc > 0 else 0
+            
+            print(f"   - Sequential: {t_seq:.2f}s")
+            print(f"   - Concurrent: {t_conc:.2f}s")
+            print(f"   >>> SPEEDUP: {speedup:.2f}x (Saved {saved:.2f}s)")
+            print(f"   [CUMULATIVE] Total Saved: {cum_saved:.2f}s | Global Speedup: {cum_speedup:.2f}x")
+            print("-" * 50)
+            
+            return results
+        else:
+            # Standard fast path (concurrent only)
+            print(f"[INFO] Loading {len(links)} granules concurrently...")
+            return _run_concurrent(links)
 
     # Load the primary data layer (DS)
-    DS = load_datasets(data_layer_links)
+    DS = load_datasets(data_layer_links, label="Primary Data")
 
-    # If conf_layer_links AND mode == 'flood' compile and load layers to use in filtering
+    # If conf_layer_links AND mode == 'flood'
     if conf_layer_links and mode == "flood":
-        conf_DS = load_datasets(conf_layer_links)
+        conf_DS = load_datasets(conf_layer_links, label="Confidence")
         return DS, conf_DS
 
-    # If conf_layer_links AND date_layer_links AND mode == 'fire' or mode == 'landslide' compile and load layers to use in filtering
-    if (
-        conf_layer_links
-        and date_layer_links
-        and (mode == "fire" or mode == "landslide")
-    ):
-        conf_DS = load_datasets(conf_layer_links)
-        date_DS = load_datasets(date_layer_links)
+    # If conf_layer_links AND date_layer_links AND mode == 'fire' or 'landslide'
+    if (conf_layer_links and date_layer_links and (mode == "fire" or mode == "landslide")):
+        date_DS = load_datasets(date_layer_links, label="Date")
+        conf_DS = load_datasets(conf_layer_links, label="Confidence")
         return DS, date_DS, conf_DS
     else:
         return DS
@@ -1290,6 +1341,7 @@ def generate_products(
     filter_date=None,
     reclassify_snow_ice=False,
     slope_threshold=None,
+    benchmark_stats=None
     ):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
@@ -1305,6 +1357,7 @@ def generate_products(
         filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' and 'landslide' mode.
         reclassify_snow_ice (bool, optional): Whether to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. Default is False.
         slope_threshold (int, optional): Slope threshold in degrees for masking in 'landslide' mode. If None, no slope masking is applied.
+        benchmark_stats (dict, optional): Dictionary to store benchmarking statistics.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
@@ -1433,6 +1486,7 @@ def generate_products(
                             mode,
                             conf_layer_links=conf_layer_links,
                             date_layer_links=date_layer_links,
+                            benchmark_stats=benchmark_stats
                         )
                         if filter_date:
                             date_threshold = compute_date_threshold(filter_date)
@@ -1460,6 +1514,7 @@ def generate_products(
                                 mode,
                                 conf_layer_links=conf_layer_links,
                                 date_layer_links=date_layer_links,
+                                benchmark_stats=benchmark_stats
                             )
 
                             if filter_date:
@@ -1470,7 +1525,7 @@ def generate_products(
                                 layout_date = "All Dates"
 
                         elif short_name == "OPERA_L2_RTC-S1_V1":
-                            DS = compile_and_load_data(urls, mode)
+                            DS = compile_and_load_data(urls, mode, benchmark_stats=benchmark_stats)
 
                     elif mode == "flood":
                         conf_column = "Download URL CONF"
@@ -1482,9 +1537,9 @@ def generate_products(
                         if not conf_layer_links:
                             print(f"[WARN] No CONF URLs found for {short_name} on {pass_id}")
                             conf_DS = None
-                            DS = compile_and_load_data(urls, mode)
+                            DS = compile_and_load_data(urls, mode, benchmark_stats=benchmark_stats)
                         else:
-                            DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
+                            DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links, benchmark_stats=benchmark_stats)
 
                     # Group loaded DataArrays by CRS (UTM Zone)
                     crs_groups = defaultdict(list)
@@ -2790,6 +2845,11 @@ def main():
 
     print(f"[INFO] Outputting results to: {mode_dir}")
 
+    # Set up benchmarking stats if requested
+    benchmark_stats = None
+    if args.benchmark:
+        benchmark_stats = {'seq': 0.0, 'conc': 0.0}
+
     # Generate products
     generate_products(
         df_opera, 
@@ -2800,8 +2860,23 @@ def main():
         args.zoom_bbox, 
         args.filter_date, 
         args.reclassify_snow_ice,
-        slope_threshold=args.slope_threshold
+        slope_threshold=args.slope_threshold,
+        benchmark_stats=benchmark_stats
     )
+
+    if args.benchmark and benchmark_stats:
+        print("\n" + "="*50)
+        print("FINAL BENCHMARK REPORT")
+        print("="*50)
+        print(f"Total Time Sequential: {benchmark_stats['seq']:.2f}s")
+        print(f"Total Time Concurrent: {benchmark_stats['conc']:.2f}s")
+        
+        saved = benchmark_stats['seq'] - benchmark_stats['conc']
+        speedup = benchmark_stats['seq'] / benchmark_stats['conc'] if benchmark_stats['conc'] > 0 else 0
+        
+        print(f"TOTAL TIME SAVED:      {saved:.2f}s")
+        print(f"GLOBAL SPEEDUP:        {speedup:.2f}x")
+        print("="*50 + "\n")
 
     return
 
