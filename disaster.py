@@ -379,7 +379,7 @@ def read_opera_metadata_excel(output_dir):
     Raises:
         FileNotFoundError: If the Excel file does not exist.
     """
-    # Specify paht to opera_products_metadata.xlsx
+    # Specify path to opera_products_metadata.xlsx
     excel_path = Path(output_dir) / "opera_products_metadata.xlsx"
     
     if not excel_path.exists():
@@ -423,10 +423,6 @@ def get_master_crs(df_opera, mode):
     import rioxarray
 
     print("[INFO] Scanning all granules to determine Global Master CRS...")
-    
-    # NOTE: In this pre-scan, we don't need persistent auth because we only check metadata.
-    # However, if it fails, we should technically use the cached auth. For simplicity, we skip full auth handling here
-    # assuming we just need to peek at the files.
     
     # Collect all unique URLs relevant to the mode
     all_urls = []
@@ -646,12 +642,12 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
         if benchmark_stats is not None:
             print(f"\n[BENCHMARK] Testing load speeds for {len(links)} items ({label})...")
             
-            # 1. Run Sequential
+            # Run Sequential
             t0 = time.time()
             _ = _run_sequential(links)
             t_seq = time.time() - t0
             
-            # 2. Run Concurrent
+            # Run Concurrent
             t0 = time.time()
             results = _run_concurrent(links)
             t_conc = time.time() - t0
@@ -966,8 +962,6 @@ def compute_and_write_difference(
     else:
         print("[INFO] Computing categorical transition codes for DSWx...")
         
-        # FIX: Ensure nd is a valid integer (255) if input nodata is None or NaN
-        # This prevents the 'cannot convert float NaN to integer' error
         if nd is None or np.isnan(nd):
             nd = 255.0
         
@@ -1136,8 +1130,7 @@ def compute_and_write_difference_positive_change_only(
 
     print(f"[INFO] Computing generalized positive change (gain) layer for {out_path.name}...")
 
-    # 1. Open rasters
-    # Open unmasked to handle raw integer values directly
+    # Open rasters
     da_later = rioxarray.open_rasterio(later_path, masked=False).squeeze()
     da_early = rioxarray.open_rasterio(earlier_path, masked=False).squeeze()
 
@@ -1519,7 +1512,6 @@ def generate_products(
     unique_dates.sort()
 
     # Create an index of mosaics created for use in pair-wise differencing
-    # Key is now the unique PassID (YYYYMMDDtHHMM)
     mosaic_index = defaultdict(lambda: defaultdict(dict))
     
     # Initialize Executor for Plotting and Differencing
@@ -1829,7 +1821,7 @@ def generate_products(
         executor.shutdown(wait=True)
         
         if benchmark_stats is not None:
-            # 1. Process Plotting Futures (Standard Mosaics)
+            # Process Plotting Futures (Standard Mosaics)
             total_plotting_time = 0.0
             for f in plotting_futures:
                 try:
@@ -1838,7 +1830,7 @@ def generate_products(
                 except Exception:
                     pass
             
-            # 2. Process Differencing Pipeline Futures (Returns (diff_time, plot_time))
+            # Process Differencing Pipeline Futures (Returns (diff_time, plot_time))
             total_diff_time = 0.0
             for f in differencing_futures:
                 try: 
@@ -1953,7 +1945,6 @@ def make_map(
     import math
     import os
     import re
-    import uuid  # <--- Added import
 
     import pygmt
     import rioxarray
