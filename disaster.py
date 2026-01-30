@@ -16,6 +16,7 @@ import rioxarray
 import xarray as xr
 from osgeo import gdal
 import re
+import uuid
 
 
 def parse_arguments():
@@ -616,8 +617,7 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
         if date_layer_links:
             date_layer_links = [link for i, link in enumerate(date_layer_links) if is_most_common[i]]
 
-    # --- Loading Helpers ---
-
+    # Define helpers for loading data
     def _load_single(link):
         """Helper to load a single dataset, handling auth fallback."""
         try:
@@ -687,9 +687,7 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
             # Standard fast path (concurrent only)
             print(f"[INFO] Loading {len(links)} granules concurrently...")
             return _run_concurrent(links)
-
-    # --- Execution ---
-
+    
     # Load the primary data layer (DS)
     DS = load_datasets(data_layer_links, label="Primary Data")
 
@@ -1381,6 +1379,44 @@ def run_plotting_task(
         return 0.0
 
 
+def run_difference_pipeline(
+    earlier_path, later_path, diff_path, mode,
+    maps_dir, layouts_dir, short_name, layer,
+    diff_id, diff_date_str, layout_title, bbox, zoom_bbox,
+    reclassify_snow_ice
+):
+    """
+    Combined task: Computes Difference -> Plots Map -> Creates Layout.
+    Returns (diff_time, plot_time).
+    """
+    import time
+    
+    # Differencing
+    t0_diff = time.time()
+    try:
+        if mode == "flood":
+            compute_and_write_difference_positive_change_only(earlier_path, later_path, diff_path)
+            is_diff = True
+        elif mode == "landslide":
+            compute_and_write_difference(earlier_path, later_path, diff_path, nodata_value=None, log=True)
+            is_diff = True
+        else:
+            return 0.0, 0.0
+    except Exception as e:
+        print(f"[ERROR] Diff computation failed: {e}")
+        return 0.0, 0.0
+    t_diff = time.time() - t0_diff
+
+    # Plotting (Sequential within this worker, but parallel to main)
+    t_plot = run_plotting_task(
+        maps_dir, layouts_dir, diff_path, short_name, layer,
+        diff_id, diff_date_str, layout_title, bbox, zoom_bbox,
+        reclassify_snow_ice, is_diff
+    )
+    
+    return t_diff, t_plot
+
+
 def generate_products(
     df_opera,
     mode,
@@ -1486,9 +1522,10 @@ def generate_products(
     # Key is now the unique PassID (YYYYMMDDtHHMM)
     mosaic_index = defaultdict(lambda: defaultdict(dict))
     
-    # Initialize ProcessPoolExecutor for plotting
+    # Initialize Executor for Plotting and Differencing
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=4) 
     plotting_futures = []
+    differencing_futures = []
 
     try:
         for date in unique_dates:
@@ -1745,87 +1782,17 @@ def generate_products(
                         )
                         plotting_futures.append(future)
 
-        # Pair-wise differencing for 'flood' mode
-        if mode == "flood":
-            print("[INFO] Computing pairwise differences between water products...")
-            skipped = []
-
+        # Concurrent differencing
+        if mode in ["flood", "landslide"]:
+            print(f"[INFO] Submitting concurrent pair-wise differencing tasks ({mode})...")
+            
             for short_name_k, layers_dict in mosaic_index.items():
+                # Filter for relevant products only (RTC for Landslide, all for Flood)
+                if mode == "landslide" and short_name_k != "OPERA_L2_RTC-S1_V1":
+                    continue
+                
                 for layer_k, date_map in layers_dict.items():
-
                     # dates is now a list of sorted pass_ids (YYYYMMDDtHHMM)
-                    dates = sorted(date_map.keys()) 
-
-                    for i in range(len(dates)):
-                        for j in range(i + 1, len(dates)):
-                            d_early = dates[i]
-                            d_later = dates[j]
-
-                            early_info = date_map[d_early]
-                            later_info = date_map[d_later]
-                            
-                            crs_a = early_info["crs"]
-                            crs_b = later_info["crs"]
-                            
-                            if crs_a != crs_b:
-                                skipped.append({
-                                    "short_name": short_name_k,
-                                    "layer": layer_k,
-                                    "date_earlier": d_early,
-                                    "date_later": d_later,
-                                    "reason": "Mosaics have different master CRS"
-                                })
-                                continue
-
-                            # Name using pass IDs
-                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_water_gain.tif"
-                            diff_path = (mode_dir / "data") / diff_name
-
-                            try:
-                                compute_and_write_difference_positive_change_only(
-                                    earlier_path=early_info["path"],
-                                    later_path=later_info["path"],
-                                    out_path=diff_path
-                                )
-                                print(f"[INFO] Wrote diff COG: {diff_path}")
-                                
-                                diff_id_str = f"{d_later}_{d_early}"
-                                diff_date_str_layout = f"{d_early}, {d_later}"
-
-                                # --- Background Plotting for Difference ---
-                                future = executor.submit(
-                                    run_plotting_task,
-                                    maps_dir, layouts_dir, diff_path, short_name_k, layer_k,
-                                    diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
-                                    reclassify_snow_ice, True, # is_difference=True
-                                    benchmark_stats is not None # benchmark_mode
-                                )
-                                plotting_futures.append(future)
-                            
-                            except Exception as e:
-                                skipped.append({
-                                    "short_name": short_name_k,
-                                    "layer": layer_k,
-                                    "date_earlier": d_early,
-                                    "date_later": d_later,
-                                    "error": str(e),
-                                })
-
-            report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
-            with open(report_path, "w") as f:
-                json.dump(skipped, f, indent=2)
-
-        # Pair-wise differencing for 'landslide' mode
-        if mode == "landslide":
-            print("[INFO] Computing pairwise log difference between RTC backscatter products...")
-            skipped = []
-
-            for short_name_k, layers_dict in mosaic_index.items():
-                for layer_k, date_map in layers_dict.items():
-
-                    if short_name_k != "OPERA_L2_RTC-S1_V1":
-                        continue
-                        
                     dates = sorted(date_map.keys())
 
                     for i in range(len(dates)):
@@ -1835,55 +1802,34 @@ def generate_products(
 
                             early_info = date_map[d_early]
                             later_info = date_map[d_later]
-
+                            
                             if early_info["crs"] != later_info["crs"]:
                                 continue
 
-                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_log-diff.tif"
+                            # Setup filenames and paths
+                            suffix = "water_gain.tif" if mode == "flood" else "log-diff.tif"
+                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_{suffix}"
                             diff_path = (mode_dir / "data") / diff_name
                             
-                            try:
-                                compute_and_write_difference(
-                                    earlier_path=early_info["path"],
-                                    later_path=later_info["path"],
-                                    out_path=diff_path,
-                                    nodata_value=None,
-                                    log=True
-                                )
-                                print(f"[INFO] Wrote diff COG: {diff_path}")
-                                
-                                diff_id_str = f"{d_later}_{d_early}"
-                                diff_date_str_layout = f"{d_early}, {d_later}"
+                            diff_id_str = f"{d_later}_{d_early}"
+                            diff_date_str_layout = f"{d_early}, {d_later}"
 
-                                # --- Background Plotting for Difference ---
-                                future = executor.submit(
-                                    run_plotting_task,
-                                    maps_dir, layouts_dir, diff_path, short_name_k, layer_k,
-                                    diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
-                                    reclassify_snow_ice, True, # is_difference=True
-                                    benchmark_stats is not None # benchmark_mode
-                                )
-                                plotting_futures.append(future)
-
-                            except Exception as e:
-                                 skipped.append({
-                                    "short_name": short_name_k,
-                                    "layer": layer_k,
-                                    "date_earlier": d_early,
-                                    "date_later": d_later,
-                                    "error": str(e),
-                                })
-
-            report_path = (mode_dir / "data") / "log-difference_skipped_pairs.json"
-            with open(report_path, "w") as f:
-                json.dump(skipped, f, indent=2)
+                            # Submit Pipeline Task (Compute Diff -> Map -> Layout)
+                            future = executor.submit(
+                                run_difference_pipeline,
+                                early_info["path"], later_info["path"], diff_path, mode,
+                                maps_dir, layouts_dir, short_name_k, layer_k,
+                                diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
+                                reclassify_snow_ice
+                            )
+                            differencing_futures.append(future)
 
     finally:
-        print("[INFO] Waiting for all background plotting tasks to finish...")
+        print("[INFO] Waiting for all background tasks to finish...")
         executor.shutdown(wait=True)
         
-        # Calculate Plotting Stats if needed
         if benchmark_stats is not None:
+            # 1. Process Plotting Futures (Standard Mosaics)
             total_plotting_time = 0.0
             for f in plotting_futures:
                 try:
@@ -1892,12 +1838,25 @@ def generate_products(
                 except Exception:
                     pass
             
-            # Sequential Estimate: Sum of all plotting times
+            # 2. Process Differencing Pipeline Futures (Returns (diff_time, plot_time))
+            total_diff_time = 0.0
+            for f in differencing_futures:
+                try: 
+                    d_t, p_t = f.result()
+                    total_diff_time += d_t
+                    total_plotting_time += p_t
+                except Exception:
+                    pass
+            
+            # Update Stats
             if 'plotting' in benchmark_stats:
                 benchmark_stats['plotting']['seq'] = total_plotting_time
                 benchmark_stats['plotting']['conc'] = 0.1 # Negligible
+            if 'differencing' in benchmark_stats:
+                benchmark_stats['differencing']['seq'] = total_diff_time
+                benchmark_stats['differencing']['conc'] = 0.1 # Negligible
         
-        print("[INFO] All plotting tasks complete.")
+        print("[INFO] All tasks complete.")
 
     return
 
@@ -1976,6 +1935,20 @@ def make_map(
 ):
     """
     Create a map using PyGMT from the provided mosaic path.
+
+    Args:
+        maps_dir (Path): Directory where the map will be saved.
+        mosaic_path (Path): Path to the mosaic file.
+        short_name (str): Short name of the product.
+        layer (str): Layer name to be used in the map.
+        date (str): Date/PassID string.
+        bbox (list): Bounding box in the form [South, North, West, East].
+        zoom_bbox (list, optional): Bounding box for the zoom-in inset map, in the form [South, North, West, East].
+        is_difference (bool, optional): Flag to indicate if the mosaic is a difference product. Defaults to False.
+    Returns:
+        map_name (Path): Path to the saved map image.
+    Raises:
+        ImportError: If required libraries are not installed.
     """
     import math
     import os
@@ -1987,16 +1960,20 @@ def make_map(
     from pygmt.params import Box
     from pyproj import Geod
 
-    # Helper to prettify pass IDs
+    # Helper to prettify pass IDs (YYYYMMDDtHHMM -> YYYY-MM-DD HH:MM)
     def format_pass_id(pid):
+        # If it matches YYYYMMDDtHHMM
         if re.match(r"\d{8}t\d{4}", pid):
              return f"{pid[:4]}-{pid[4:6]}-{pid[6:8]} {pid[9:11]}:{pid[11:13]}"
+        # If it matches YYYY-MM-DD
         if re.match(r"\d{4}-\d{2}-\d{2}", pid):
             return pid
         return pid
 
     # Determine date string for filename
     if is_difference:
+        # Update regex to support standard dates (YYYY-MM-DD) AND pass IDs (YYYYMMDDtHHMM)
+        # Groups: 1=Later, 2=Earlier
         match = re.search(
             r"((?:\d{4}-\d{2}-\d{2})|(?:\d{8}t\d{4}))_((?:\d{4}-\d{2}-\d{2})|(?:\d{8}t\d{4}))_(\_\d+N|\_\d+S|\_EPSG\d+|\_Hash\d+)?(?:log-)?diff",
             str(mosaic_path),
@@ -2034,10 +2011,11 @@ def make_map(
             nodata_value = 255
             
         if nodata_value is not None:
+            # Mask out nodata
             grd = grd.where(grd != nodata_value)
 
         # Define region
-        region = [bbox[2], bbox[3], bbox[0], bbox[1]]
+        region = [bbox[2], bbox[3], bbox[0], bbox[1]]  # [xmin, xmax, ymin, ymax]
 
         # Define target aspect ratio
         target_aspect = 60 / 100
@@ -2099,17 +2077,21 @@ def make_map(
 
             # 'flood' mode (DSWx)
             else:
+                # Check data range to determine if this is Binary Gain or Full Categorical
                 valid_vals = grd.values[~np.isnan(grd.values)]
                 max_val = valid_vals.max() if valid_vals.size > 0 else 0
 
-                # --- Sub-Case B1: Binary Positive Change ---
+                # --- Sub-Case B1: Binary Positive Change (Max value is 1) ---
                 if max_val <= 1:
-                    # Unique filename
                     cpt_path = maps_dir / f"binary_gain_{unique_id}.cpt"
                     
+                    # Create Simple Blue/White CPT
                     with open(cpt_path, "w") as f:
+                        # 0 -> White (Fully Transparent 100)
                         f.write("0 255/255/255@100 1 255/255/255@100\n")
+                        # 1 -> Blue (Opaque 0)
                         f.write("1 0/0/200@0 2 0/0/200@0\n")
+                        # Background/NaN
                         f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
 
                     fig.grdimage(
@@ -2117,7 +2099,7 @@ def make_map(
                         cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
                     )
 
-                    # Unique Legend
+                    # Simple Legend
                     legend_path = maps_dir / f"binary_legend_{unique_id}.txt"
                     with open(legend_path, "w") as f:
                         f.write("H 10p,Helvetica-Bold Water Change\n")
@@ -2132,12 +2114,11 @@ def make_map(
                         os.remove(legend_path)
                     except: pass
 
-                # --- Sub-Case B2: Full Categorical ---
+                # --- Sub-Case B2: Full Categorical (Max value > 1) ---
                 else:
-                    # Unique filename
                     cpt_path = maps_dir / f"categorical_diff_{unique_id}.cpt"
                     
-                    # Define color map for categories
+                    # Define color map for full 0-15 classes
                     color_map = {
                         # No Change (Black / Transparent for 0)
                         0:  (255, 255, 255, 0),    5:  (0, 0, 0, 255),
@@ -2154,6 +2135,7 @@ def make_map(
                         7:  (30, 144, 255, 255)
                     }
 
+                    # Build valid CPT
                     with open(cpt_path, "w") as f:
                         for i in range(16):
                             if i in color_map:
@@ -2169,7 +2151,7 @@ def make_map(
                         cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
                     )
 
-                    # Unique Legend
+                    # Full Legend
                     legend_path = maps_dir / f"categorical_legend_{unique_id}.txt"
                     with open(legend_path, "w") as f:
                         f.write("H 10p,Helvetica-Bold Water Change Classes\n")
@@ -2188,47 +2170,119 @@ def make_map(
                     except:
                         pass
 
+        # Add grid image (based on product/layer)
         elif short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "WTR":
-             color_palette = "palettes/DSWx-HLS_WTR.cpt"
-             fig.grdimage(grid=grd, region=region_padded, projection=projection, cmap=color_palette, frame=["WSne", "xaf", "yaf"], nan_transparent=True)
-             fig.colorbar(cmap=color_palette, equalsize=1.5)
-        
+            color_palette = "palettes/DSWx-HLS_WTR.cpt"
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+            )
+            fig.colorbar(cmap=color_palette, equalsize=1.5)
+
         elif short_name == "OPERA_L3_DSWX-HLS_V1" and layer == "BWTR":
             color_palette = "palettes/DSWx-HLS_BWTR.cpt"
-            fig.grdimage(grid=grd, region=region_padded, projection=projection, cmap=color_palette, frame=["WSne", "xaf", "yaf"], nan_transparent=True)
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+            )
             fig.colorbar(cmap=color_palette, equalsize=1.5)
 
         elif short_name == "OPERA_L3_DSWX-S1_V1" and layer == "WTR":
             color_palette = "palettes/DSWx-S1_WTR.cpt"
-            fig.grdimage(grid=grd, region=region_padded, projection=projection, cmap=color_palette, frame=["WSne", "xaf", "yaf"], nan_transparent=True)
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+            )
             fig.colorbar(cmap=color_palette, equalsize=1.5)
 
         elif short_name == "OPERA_L3_DSWX-S1_V1" and layer == "BWTR":
             color_palette = "palettes/DSWx-S1_BWTR.cpt"
-            fig.grdimage(grid=grd, region=region_padded, projection=projection, cmap=color_palette, frame=["WSne", "xaf", "yaf"], nan_transparent=True)
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+            )
             fig.colorbar(cmap=color_palette, equalsize=1.5)
 
         elif layer == "VEG-ANOM-MAX":
             color_palette = "palettes/VEG-ANOM-MAX.cpt"
-            fig.grdimage(grid=grd, region=region_padded, projection=projection, cmap=color_palette, frame=["WSne", "xaf", "yaf"], nan_transparent=True)
-            fig.colorbar(cmap=color_palette, frame="xaf+lVEG-ANOM-MAX(%)")
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+            )
+            fig.colorbar(
+                cmap=color_palette,
+                frame="xaf+lVEG-ANOM-MAX(%)",
+            )
 
         elif layer == "VEG-DIST-STATUS":
             color_palette = "palettes/VEG-DIST-STATUS.cpt"
-            fig.grdimage(grid=grd, region=region_padded, projection=projection, cmap=color_palette, frame=["WSne", "xaf", "yaf"], nan_transparent=True)
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+            )
             fig.colorbar(cmap=color_palette, equalsize=1.5)
 
         elif short_name.startswith("OPERA_L2_RTC"):
+
             data_values = grd.values[~np.isnan(grd.values)]
+
+            # Calculate the 2nd and 98th percentiles
             p2, p98 = np.percentile(data_values, [2, 98])
-            if p2 >= p98: p2 -= 0.01; p98 += 0.01
+
+            # Ensure min is less than max
+            if p2 >= p98:
+                p2 -= 0.01
+                p98 += 0.01
+
+            # Calculate increment for 1000 steps
             inc = (p98 - p2) / 1000.0
-            cpt_name = f"rtc_grayscale_{unique_id}" # Unique Name
-            pygmt.makecpt(cmap="gray", series=[p2, p98, inc], output=cpt_name, continuous=True)
-            fig.grdimage(grid=grd, region=region_padded, projection=projection, cmap=cpt_name, frame=["WSne", "xaf", "yaf"], nan_transparent=True)
-            fig.colorbar(cmap=cpt_name, frame=["x+lNormalized backscatter (@~g@~@-0@-)"])
-            if os.path.exists(cpt_name): os.remove(cpt_name)
-        
+
+            cpt_name = f"rtc_grayscale_{unique_id}"
+
+            pygmt.makecpt(
+                cmap="gray", series=[p2, p98, inc], output=cpt_name, continuous=True
+            )
+
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=cpt_name,
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+            )
+
+            fig.colorbar(
+                cmap=cpt_name, frame=["x+lNormalized backscatter (@~g@~@-0@-)"]
+            )
+            
+            if os.path.exists(cpt_name):
+                os.remove(cpt_name)
+
         # Add scalebar and compass rose
         xmin, xmax, ymin, ymax = region_padded
         center_lat = (ymin + ymax) / 2
@@ -2385,6 +2439,16 @@ def make_map(
                         projection="M5c",
                         cmap=cpt_name,
                         nan_transparent=True,
+                    )
+                elif is_difference and "gain" in str(mosaic_path):
+                    fig.grdimage(
+                        grid=grd, region=zoom_region, projection="M5c",
+                        cmap=str(cpt_path), nan_transparent=True
+                    )
+                elif is_difference:
+                    fig.grdimage(
+                        grid=grd, region=zoom_region, projection="M5c",
+                        cmap=cpt_name, nan_transparent=True
                     )
 
                 # Add scale bar to the inset map. Use Bottom-Left (jBL) inside the inset frame.
@@ -2747,6 +2811,7 @@ def make_layout(
 
     layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
+    plt.close(fig)
     return
 
 
@@ -2870,7 +2935,8 @@ def main():
     if args.benchmark:
         benchmark_stats = {
             'loading': {'seq': 0.0, 'conc': 0.0},
-            'plotting': {'seq': 0.0, 'conc': 0.0}
+            'plotting': {'seq': 0.0, 'conc': 0.0},
+            'differencing': {'seq': 0.0, 'conc': 0.0}
         }
 
     # Generate products
@@ -2894,7 +2960,7 @@ def main():
         print("FINAL BENCHMARK REPORT")
         print("="*50)
         
-        # --- LOADING ---
+        # Report benchmarking results for the 'loading' stage
         l_seq = benchmark_stats['loading']['seq']
         l_conc = benchmark_stats['loading']['conc']
         l_saved = l_seq - l_conc
@@ -2902,7 +2968,16 @@ def main():
         print(f"  Sequential: {l_seq:.2f}s | Concurrent: {l_conc:.2f}s")
         print(f"  Saved:      {l_saved:.2f}s")
         
-        # --- PLOTTING ---
+        # Report benchmarking results for the 'differencing' stage
+        d_seq = benchmark_stats['differencing']['seq']
+        d_conc = benchmark_stats['differencing']['conc'] # effectively 0
+        d_saved = d_seq - d_conc
+        if d_seq > 0:
+            print(f"DIFFERENCING (Backgrounded):")
+            print(f"  Sequential: {d_seq:.2f}s | Concurrent: ~0s (Overlapped)")
+            print(f"  Saved:      {d_saved:.2f}s")
+        
+        # Report benchmarking results for the 'plotting' stage
         p_seq = benchmark_stats['plotting']['seq']
         p_conc = benchmark_stats['plotting']['conc'] # effectively 0
         p_saved = p_seq - p_conc
@@ -2911,7 +2986,7 @@ def main():
         print(f"  Saved:      {p_saved:.2f}s")
         
         print("-" * 50)
-        print(f"TOTAL TIME SAVED: {l_saved + p_saved:.2f}s")
+        print(f"TOTAL TIME SAVED: {l_saved + d_saved + p_saved:.2f}s")
         print("="*50 + "\n")
 
     return
