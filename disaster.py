@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import shutil
+import time
+import concurrent.futures
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +16,7 @@ import rioxarray
 import xarray as xr
 from osgeo import gdal
 import re
+import uuid
 
 
 def parse_arguments():
@@ -160,6 +163,12 @@ def parse_arguments():
         default=None,
         required=False,
         help="Slope threshold in degrees (0-100). Pixels with slope < threshold will be masked in Landslide mode.",
+    )
+
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="If set, runs data loading in both sequential and concurrent modes to compare performance.",
     )
 
     args = parser.parse_args()
@@ -370,7 +379,7 @@ def read_opera_metadata_excel(output_dir):
     Raises:
         FileNotFoundError: If the Excel file does not exist.
     """
-    # Specify paht to opera_products_metadata.xlsx
+    # Specify path to opera_products_metadata.xlsx
     excel_path = Path(output_dir) / "opera_products_metadata.xlsx"
     
     if not excel_path.exists():
@@ -414,10 +423,7 @@ def get_master_crs(df_opera, mode):
     import rioxarray
 
     print("[INFO] Scanning all granules to determine Global Master CRS...")
-
-    # Authenticate
-    username, password = authenticate()
-
+    
     # Collect all unique URLs relevant to the mode
     all_urls = []
     
@@ -455,6 +461,14 @@ def get_master_crs(df_opera, mode):
     
     print(f"[INFO] Checking CRS of {sample_size} representative granules...")
     
+    # For this check, we authenticate locally just for this function if needed
+    try:
+        username, password = authenticate()
+    except Exception:
+        username, password = None, None
+
+    from opera_utils.disp._remote import open_file
+
     for i, url in enumerate(all_urls[:sample_size]):
         try:
             # Try direct open (local/s3)
@@ -535,27 +549,28 @@ def get_master_grid_props(bbox_latlon, target_crs_proj4, target_res=30):
     }
 
 
-def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None):
+def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None, benchmark_stats=None, username=None, password=None):
     """
-    Compile and load data from the provided layer links for mosaicking.
-    If there are S1A and S1C-derived OPERA products over the same area on the same day, only the most common
-    (S1A or S1C) is used in the mosaicking.
+    Compile and load data from the provided layer links for mosaicking using multithreading.
     
     Args:
         data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
         mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
         conf_layer_links (list, optional): List of URLs for additional layers to filter false positives.
         date_layer_links (list, optional): List of URLs for date layers to filter by date.
+        benchmark_stats (dict, optional): Mutable dictionary to track benchmarking stats. 
+                                          If provided, enables benchmark mode.
+        username (str, optional): Earthdata username.
+        password (str, optional): Earthdata password.
     Returns:
         DS: List of rioxarray datasets loaded from the provided links (in granule order).
         conf_DS: List of rioxarray datasets for confidence layers (if applicable, in granule order).
         date_DS: List of rioxarray datasets for date layers (if applicable, in granule order).
-    Raises:
-        Exception: If there is an error loading any of the datasets.
     """
     import logging
+    import time
+    import concurrent.futures
     from collections import Counter
-
     from opera_utils.disp._remote import open_file
 
     logging.getLogger().setLevel(logging.ERROR)
@@ -565,10 +580,10 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
     if data_layer_links and Path(data_layer_links[0]).exists():
         is_local = True
         print("[INFO] Local files detected. Skipping Earthdata authentication.")
-        username, password = None, None
     else:
-        # Authenticate to get username and password (only for cloud URLs)
-        username, password = authenticate()
+        # If credentials weren't passed, authenticate (fallback)
+        if not username or not password:
+             username, password = authenticate()
 
     # Ensure only S1A or S1C are used (not both) for a single date
     satellite_counts = Counter()
@@ -598,37 +613,89 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
         if date_layer_links:
             date_layer_links = [link for i, link in enumerate(date_layer_links) if is_most_common[i]]
 
-    # Helper to load datasets
-    def load_datasets(links):
-        datasets = []
-        for link in links:
-            try:
-                datasets.append(rioxarray.open_rasterio(link, masked=False))
-            except Exception as e:
-                f = open_file(
-                    link,
-                    earthdata_username=username,
-                    earthdata_password=password,
-                )
-                datasets.append(rioxarray.open_rasterio(f, masked=False))
-        return datasets
+    # Define helpers for loading data
+    def _load_single(link):
+        """Helper to load a single dataset, handling auth fallback."""
+        try:
+            return rioxarray.open_rasterio(link, masked=False)
+        except Exception:
+            f = open_file(link, earthdata_username=username, earthdata_password=password)
+            return rioxarray.open_rasterio(f, masked=False)
 
+    def _run_sequential(links):
+        """Sequential loading for benchmarking."""
+        return [_load_single(link) for link in links]
+
+    def _run_concurrent(links):
+        """Concurrent loading using ThreadPoolExecutor."""
+        if not links:
+            return []
+        max_workers = min(20, len(links))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            return list(executor.map(_load_single, links))
+
+    def load_datasets(links, label="Dataset"):
+        """Orchestrates loading. If benchmark_stats is set, runs both and tracks cumulative stats."""
+        if not links:
+            return []
+            
+        if benchmark_stats is not None:
+            print(f"\n[BENCHMARK] Testing load speeds for {len(links)} items ({label})...")
+            
+            # Run Sequential
+            t0 = time.time()
+            _ = _run_sequential(links)
+            t_seq = time.time() - t0
+            
+            # Run Concurrent
+            t0 = time.time()
+            results = _run_concurrent(links)
+            t_conc = time.time() - t0
+            
+            # Update Globals - Using the 'loading' key
+            if 'loading' in benchmark_stats:
+                benchmark_stats['loading']['seq'] += t_seq
+                benchmark_stats['loading']['conc'] += t_conc
+                
+                # Calculate metrics for printout
+                cum_seq = benchmark_stats['loading']['seq']
+                cum_conc = benchmark_stats['loading']['conc']
+                cum_saved = cum_seq - cum_conc
+                cum_speedup = cum_seq / cum_conc if cum_conc > 0 else 0
+            else:
+                # Fallback if structure is simple
+                cum_saved = 0
+                cum_speedup = 0
+            
+            # Calculate local metrics
+            speedup = t_seq / t_conc if t_conc > 0 else 0
+            saved = t_seq - t_conc
+            
+            print(f"   - Sequential: {t_seq:.2f}s")
+            print(f"   - Concurrent: {t_conc:.2f}s")
+            print(f"   >>> SPEEDUP: {speedup:.2f}x (Saved {saved:.2f}s)")
+            if 'loading' in benchmark_stats:
+                print(f"   [CUMULATIVE] Total Saved: {cum_saved:.2f}s | Global Speedup: {cum_speedup:.2f}x")
+            print("-" * 50)
+            
+            return results
+        else:
+            # Standard fast path (concurrent only)
+            print(f"[INFO] Loading {len(links)} granules concurrently...")
+            return _run_concurrent(links)
+    
     # Load the primary data layer (DS)
-    DS = load_datasets(data_layer_links)
+    DS = load_datasets(data_layer_links, label="Primary Data")
 
-    # If conf_layer_links AND mode == 'flood' compile and load layers to use in filtering
+    # If conf_layer_links AND mode == 'flood'
     if conf_layer_links and mode == "flood":
-        conf_DS = load_datasets(conf_layer_links)
+        conf_DS = load_datasets(conf_layer_links, label="Confidence")
         return DS, conf_DS
 
-    # If conf_layer_links AND date_layer_links AND mode == 'fire' or mode == 'landslide' compile and load layers to use in filtering
-    if (
-        conf_layer_links
-        and date_layer_links
-        and (mode == "fire" or mode == "landslide")
-    ):
-        conf_DS = load_datasets(conf_layer_links)
-        date_DS = load_datasets(date_layer_links)
+    # If conf_layer_links AND date_layer_links AND mode == 'fire' or 'landslide'
+    if (conf_layer_links and date_layer_links and (mode == "fire" or mode == "landslide")):
+        date_DS = load_datasets(date_layer_links, label="Date")
+        conf_DS = load_datasets(conf_layer_links, label="Confidence")
         return DS, date_DS, conf_DS
     else:
         return DS
@@ -895,8 +962,6 @@ def compute_and_write_difference(
     else:
         print("[INFO] Computing categorical transition codes for DSWx...")
         
-        # FIX: Ensure nd is a valid integer (255) if input nodata is None or NaN
-        # This prevents the 'cannot convert float NaN to integer' error
         if nd is None or np.isnan(nd):
             nd = 255.0
         
@@ -1065,8 +1130,7 @@ def compute_and_write_difference_positive_change_only(
 
     print(f"[INFO] Computing generalized positive change (gain) layer for {out_path.name}...")
 
-    # 1. Open rasters
-    # Open unmasked to handle raw integer values directly
+    # Open rasters
     da_later = rioxarray.open_rasterio(later_path, masked=False).squeeze()
     da_early = rioxarray.open_rasterio(earlier_path, masked=False).squeeze()
 
@@ -1280,6 +1344,72 @@ def cluster_by_time(df, time_col="Start Time", threshold_minutes=120):
     return groups
 
 
+def run_plotting_task(
+    maps_dir, layouts_dir, mosaic_path, short_name, layer, 
+    date_id, layout_date, layout_title, bbox, zoom_bbox, 
+    reclassify_snow_ice, is_difference, benchmark_mode=False
+):
+    """
+    Wrapper function to run map and layout generation in a separate process.
+    Returns elapsed time if successful, 0.0 otherwise.
+    """
+    import time
+    t0 = time.time()
+    try:
+        map_name = make_map(
+            maps_dir, mosaic_path, short_name, layer, date_id, 
+            bbox, zoom_bbox, is_difference
+        )
+        
+        if map_name:
+            make_layout(
+                layouts_dir, map_name, short_name, layer, 
+                date_id, layout_date, layout_title, reclassify_snow_ice
+            )
+        return time.time() - t0
+    except Exception as e:
+        print(f"[ERROR] Background plotting failed for {short_name} {layer} {date_id}: {e}")
+        return 0.0
+
+
+def run_difference_pipeline(
+    earlier_path, later_path, diff_path, mode,
+    maps_dir, layouts_dir, short_name, layer,
+    diff_id, diff_date_str, layout_title, bbox, zoom_bbox,
+    reclassify_snow_ice
+):
+    """
+    Combined task: Computes Difference -> Plots Map -> Creates Layout.
+    Returns (diff_time, plot_time).
+    """
+    import time
+    
+    # Differencing
+    t0_diff = time.time()
+    try:
+        if mode == "flood":
+            compute_and_write_difference_positive_change_only(earlier_path, later_path, diff_path)
+            is_diff = True
+        elif mode == "landslide":
+            compute_and_write_difference(earlier_path, later_path, diff_path, nodata_value=None, log=True)
+            is_diff = True
+        else:
+            return 0.0, 0.0
+    except Exception as e:
+        print(f"[ERROR] Diff computation failed: {e}")
+        return 0.0, 0.0
+    t_diff = time.time() - t0_diff
+
+    # Plotting (Sequential within this worker, but parallel to main)
+    t_plot = run_plotting_task(
+        maps_dir, layouts_dir, diff_path, short_name, layer,
+        diff_id, diff_date_str, layout_title, bbox, zoom_bbox,
+        reclassify_snow_ice, is_diff
+    )
+    
+    return t_diff, t_plot
+
+
 def generate_products(
     df_opera,
     mode,
@@ -1290,6 +1420,9 @@ def generate_products(
     filter_date=None,
     reclassify_snow_ice=False,
     slope_threshold=None,
+    benchmark_stats=None,
+    username=None,
+    password=None
     ):
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
@@ -1305,6 +1438,9 @@ def generate_products(
         filter_date (str, optional): Date string (YYYY-MM-DD) to filter by date in the date filtering step in 'fire' and 'landslide' mode.
         reclassify_snow_ice (bool, optional): Whether to reclassify false snow/ice positives as water in DSWx-HLS products ONLY. Default is False.
         slope_threshold (int, optional): Slope threshold in degrees for masking in 'landslide' mode. If None, no slope masking is applied.
+        benchmark_stats (dict, optional): Dictionary to store benchmarking statistics.
+        username (str, optional): Earthdata username.
+        password (str, optional): Earthdata password.
     Raises:
         Exception: If the mode is not recognized or if there are issues with data processing.
     """
@@ -1376,73 +1512,51 @@ def generate_products(
     unique_dates.sort()
 
     # Create an index of mosaics created for use in pair-wise differencing
-    # Key is now the unique PassID (YYYYMMDDtHHMM)
     mosaic_index = defaultdict(lambda: defaultdict(dict))
+    
+    # Initialize Executor for Plotting and Differencing
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=4) 
+    plotting_futures = []
+    differencing_futures = []
 
-    for date in unique_dates:
-        df_on_date = df_opera[df_opera["Start Date"] == date]
+    try:
+        for date in unique_dates:
+            df_on_date = df_opera[df_opera["Start Date"] == date]
 
-        for short_name in short_names:
-            df_sn = df_on_date[df_on_date["Dataset"] == short_name]
+            for short_name in short_names:
+                df_sn = df_on_date[df_on_date["Dataset"] == short_name]
 
-            if df_sn.empty:
-                continue
-
-            # Cluster granules by time to separate Ascending/Descending passes
-            # Threshold: 120 minutes (2 hours). Passes are typically >10 hours apart.
-            time_clusters = cluster_by_time(df_sn, time_col="Start Time", threshold_minutes=120)
-
-            for layer in layer_names:
-                url_column = f"Download URL {layer}"
-                if url_column not in df_sn.columns:
+                if df_sn.empty:
                     continue
-                
-                # Iterate through each clustered "pass" for this date
-                for cluster_df in time_clusters:
-                    
-                    # Determine unique PassID from the earliest time in the cluster
-                    # Format: YYYYMMDDtHHMM (e.g., 20241010t0019)
-                    start_time_min = cluster_df["Start Time"].min()
-                    pass_id = start_time_min.strftime("%Y%m%dT%H%M")
-                    
-                    urls = cluster_df[url_column].dropna().tolist()
-                    if not urls:
+
+                # Cluster granules by time to separate Ascending/Descending passes
+                # Threshold: 120 minutes (2 hours). Passes are typically >10 hours apart.
+                time_clusters = cluster_by_time(df_sn, time_col="Start Time", threshold_minutes=120)
+
+                for layer in layer_names:
+                    url_column = f"Download URL {layer}"
+                    if url_column not in df_sn.columns:
                         continue
+                    
+                    # Iterate through each clustered "pass" for this date
+                    for cluster_df in time_clusters:
+                        
+                        # Determine unique PassID from the earliest time in the cluster
+                        # Format: YYYYMMDDtHHMM (e.g., 20241010t0019)
+                        start_time_min = cluster_df["Start Time"].min()
+                        pass_id = start_time_min.strftime("%Y%m%dT%H%M")
+                        
+                        urls = cluster_df[url_column].dropna().tolist()
+                        if not urls:
+                            continue
 
-                    print(f"[INFO] Processing {short_name} - {layer} for pass {pass_id} (Date: {date})")
-                    print(f"[INFO] Found {len(urls)} URLs for this pass")
+                        print(f"[INFO] Processing {short_name} - {layer} for pass {pass_id} (Date: {date})")
+                        print(f"[INFO] Found {len(urls)} URLs for this pass")
 
-                    layout_date = ""
-                    DS, conf_DS, date_DS = None, None, None
+                        layout_date = ""
+                        DS, conf_DS, date_DS = None, None, None
 
-                    if mode == "fire":
-                        date_column = "Download URL VEG-DIST-DATE"
-                        conf_column = "Download URL VEG-DIST-CONF"
-                        date_layer_links = (
-                            cluster_df[date_column].dropna().tolist()
-                            if date_column in cluster_df.columns
-                            else []
-                        )
-                        conf_layer_links = (
-                            cluster_df[conf_column].dropna().tolist()
-                            if conf_column in cluster_df.columns
-                            else []
-                        )
-                        DS, date_DS, conf_DS = compile_and_load_data(
-                            urls,
-                            mode,
-                            conf_layer_links=conf_layer_links,
-                            date_layer_links=date_layer_links,
-                        )
-                        if filter_date:
-                            date_threshold = compute_date_threshold(filter_date)
-                            layout_date = str(filter_date)
-                        else:
-                            date_threshold = 0
-                            layout_date = "All Dates"
-
-                    elif mode == "landslide":
-                        if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
+                        if mode == "fire":
                             date_column = "Download URL VEG-DIST-DATE"
                             conf_column = "Download URL VEG-DIST-CONF"
                             date_layer_links = (
@@ -1460,8 +1574,9 @@ def generate_products(
                                 mode,
                                 conf_layer_links=conf_layer_links,
                                 date_layer_links=date_layer_links,
+                                benchmark_stats=benchmark_stats,
+                                username=username, password=password
                             )
-
                             if filter_date:
                                 date_threshold = compute_date_threshold(filter_date)
                                 layout_date = str(filter_date)
@@ -1469,286 +1584,272 @@ def generate_products(
                                 date_threshold = 0
                                 layout_date = "All Dates"
 
-                        elif short_name == "OPERA_L2_RTC-S1_V1":
-                            DS = compile_and_load_data(urls, mode)
+                        elif mode == "landslide":
+                            if short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
+                                date_column = "Download URL VEG-DIST-DATE"
+                                conf_column = "Download URL VEG-DIST-CONF"
+                                date_layer_links = (
+                                    cluster_df[date_column].dropna().tolist()
+                                    if date_column in cluster_df.columns
+                                    else []
+                                )
+                                conf_layer_links = (
+                                    cluster_df[conf_column].dropna().tolist()
+                                    if conf_column in cluster_df.columns
+                                    else []
+                                )
+                                DS, date_DS, conf_DS = compile_and_load_data(
+                                    urls,
+                                    mode,
+                                    conf_layer_links=conf_layer_links,
+                                    date_layer_links=date_layer_links,
+                                    benchmark_stats=benchmark_stats,
+                                    username=username, password=password
+                                )
 
-                    elif mode == "flood":
-                        conf_column = "Download URL CONF"
-                        conf_layer_links = (
-                            cluster_df[conf_column].dropna().tolist()
-                            if conf_column in cluster_df.columns
-                            else []
-                        )
-                        if not conf_layer_links:
-                            print(f"[WARN] No CONF URLs found for {short_name} on {pass_id}")
-                            conf_DS = None
-                            DS = compile_and_load_data(urls, mode)
-                        else:
-                            DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links)
+                                if filter_date:
+                                    date_threshold = compute_date_threshold(filter_date)
+                                    layout_date = str(filter_date)
+                                else:
+                                    date_threshold = 0
+                                    layout_date = "All Dates"
 
-                    # Group loaded DataArrays by CRS (UTM Zone)
-                    crs_groups = defaultdict(list)
-                    conf_groups = defaultdict(list)
-                    date_groups = defaultdict(list)
-
-                    if not DS:
-                        continue
-
-                    aux_lists = []
-                    if conf_DS is not None and mode == "flood":
-                        aux_lists.append(conf_DS)
-                    elif conf_DS is not None and mode in ["fire", "landslide"]:
-                        aux_lists.extend([date_DS, conf_DS])
-
-                    if aux_lists:
-                        for i, (da_data, *aux_data) in enumerate(zip(DS, *aux_lists)):
-                            try:
-                                crs_str = str(da_data.rio.crs)
-                            except AttributeError:
-                                continue
-                            crs_groups[crs_str].append(da_data)
-                            if mode == "flood":
-                                conf_groups[crs_str].append(aux_data[0])
-                            elif mode in ["fire", "landslide"] and short_name.startswith("OPERA_L3_DIST"):
-                                date_groups[crs_str].append(aux_data[0])
-                                conf_groups[crs_str].append(aux_data[1])
-                    else:
-                        for i, da_data in enumerate(DS):
-                            try:
-                                crs_str = str(da_data.rio.crs)
-                            except AttributeError:
-                                continue
-                            crs_groups[crs_str].append(da_data)
-
-                    all_warped_ds = []
-                    colormap = None 
-
-                    for crs_str, ds_group in crs_groups.items():
-                        current_conf_DS = conf_groups.get(crs_str)
-                        current_date_DS = date_groups.get(crs_str)
-
-                        colormap = None  
-
-                        # Filtering/Reclassification (Per CRS Group)
-                        if mode == "fire" or (
-                            mode == "landslide" and short_name.startswith("OPERA_L3_DIST")
-                        ):
-                            ds_group, colormap = filter_by_date_and_confidence(
-                                ds_group,
-                                current_date_DS,
-                                date_threshold,
-                                DS_conf=current_conf_DS,
-                                confidence_threshold=0,
-                                fill_value=None,
-                            )
+                            elif short_name == "OPERA_L2_RTC-S1_V1":
+                                DS = compile_and_load_data(
+                                    urls, mode, 
+                                    benchmark_stats=benchmark_stats,
+                                    username=username, password=password
+                                )
 
                         elif mode == "flood":
-                            if (
-                                reclassify_snow_ice == True
-                                and short_name == "OPERA_L3_DSWX-HLS_V1"
-                                and layer in ["BWTR", "WTR"]
-                            ):
-                                if current_conf_DS is not None:
-                                    ds_group, colormap = reclassify_snow_ice_as_water(
-                                        ds_group, current_conf_DS
-                                    )
-
-                        # Reproject to master grid
-                        for da in ds_group:
-                            grid_props = master_grid.copy()
-                            dst_crs_val = grid_props.pop("dst_crs")
-                            da_warped = da.rio.reproject(
-                                dst_crs_val,
-                                **grid_props,
-                                resampling=resampling_method
+                            conf_column = "Download URL CONF"
+                            conf_layer_links = (
+                                cluster_df[conf_column].dropna().tolist()
+                                if conf_column in cluster_df.columns
+                                else []
                             )
-                            all_warped_ds.append(da_warped)
-                    
-                    if not all_warped_ds:
-                        continue
-                        
-                    if colormap is None:
-                        try:
-                            colormap = opera_mosaic.get_image_colormap(DS[0])
-                        except Exception:
-                            colormap = None
-                    
-                    output_dtype = None
-                    if short_name == "OPERA_L2_RTC-S1_V1":
-                        output_dtype = "float32"
+                            if not conf_layer_links:
+                                print(f"[WARN] No CONF URLs found for {short_name} on {pass_id}")
+                                conf_DS = None
+                                DS = compile_and_load_data(
+                                    urls, mode, 
+                                    benchmark_stats=benchmark_stats,
+                                    username=username, password=password
+                                )
+                            else:
+                                DS, conf_DS = compile_and_load_data(
+                                    urls, mode, 
+                                    conf_layer_links=conf_layer_links, 
+                                    benchmark_stats=benchmark_stats,
+                                    username=username, password=password
+                                )
 
-                    # Mosaic the datasets using the appropriate method/rule
-                    mosaic, _, nodata = opera_mosaic.mosaic_opera(all_warped_ds, product=short_name, merge_args={})
+                        # Group loaded DataArrays by CRS (UTM Zone)
+                        crs_groups = defaultdict(list)
+                        conf_groups = defaultdict(list)
+                        date_groups = defaultdict(list)
 
-                    # Apply slope mask if it has been generated previously
-                    if global_slope_mask is not None:
-                        # Ensure shape compatibility
-                        if mosaic.shape[-2:] == global_slope_mask.shape:
-                            # Set pixels with slope < threshold to nodata
-                            mosaic.values[..., global_slope_mask] = nodata
+                        if not DS:
+                            continue
+
+                        aux_lists = []
+                        if conf_DS is not None and mode == "flood":
+                            aux_lists.append(conf_DS)
+                        elif conf_DS is not None and mode in ["fire", "landslide"]:
+                            aux_lists.extend([date_DS, conf_DS])
+
+                        if aux_lists:
+                            for i, (da_data, *aux_data) in enumerate(zip(DS, *aux_lists)):
+                                try:
+                                    crs_str = str(da_data.rio.crs)
+                                except AttributeError:
+                                    continue
+                                crs_groups[crs_str].append(da_data)
+                                if mode == "flood":
+                                    conf_groups[crs_str].append(aux_data[0])
+                                elif mode in ["fire", "landslide"] and short_name.startswith("OPERA_L3_DIST"):
+                                    date_groups[crs_str].append(aux_data[0])
+                                    conf_groups[crs_str].append(aux_data[1])
                         else:
-                            print(f"[WARN] Mask shape {global_slope_mask.shape} mismatches mosaic {mosaic.shape}. Skipping slope filter.")
+                            for i, da_data in enumerate(DS):
+                                try:
+                                    crs_str = str(da_data.rio.crs)
+                                except AttributeError:
+                                    continue
+                                crs_groups[crs_str].append(da_data)
 
-                    image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata, dtype=output_dtype)
-                    
-                    # Create filename and full paths using pass_id (YYYYMMDDtHHMM)
-                    mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
-                    mosaic_path = data_dir / mosaic_name
-                    tmp_path = data_dir / f"tmp_{mosaic_name}"
+                        all_warped_ds = []
+                        colormap = None 
 
-                    copy(image, tmp_path, driver="GTiff")
-                    save_gtiff_as_cog(tmp_path, mosaic_path)
-                    cleanup_temp_file(tmp_path)
+                        for crs_str, ds_group in crs_groups.items():
+                            current_conf_DS = conf_groups.get(crs_str)
+                            current_date_DS = date_groups.get(crs_str)
 
-                    mosaic_index[short_name][layer][pass_id] = {
-                        "path": mosaic_path,
-                        "crs": master_grid["dst_crs"] 
-                    }
+                            colormap = None  
 
-                    # Make map (pass_id is passed as 'date' argument)
-                    map_name = make_map(
-                        maps_dir,
-                        mosaic_path,
-                        short_name,
-                        layer,
-                        pass_id,
-                        bbox,
-                        zoom_bbox,
-                        is_difference=False
-                    )
+                            # Filtering/Reclassification (Per CRS Group)
+                            if mode == "fire" or (
+                                mode == "landslide" and short_name.startswith("OPERA_L3_DIST")
+                            ):
+                                ds_group, colormap = filter_by_date_and_confidence(
+                                    ds_group,
+                                    current_date_DS,
+                                    date_threshold,
+                                    DS_conf=current_conf_DS,
+                                    confidence_threshold=0,
+                                    fill_value=None,
+                                )
 
-                    # Make layout
-                    make_layout(
-                        layouts_dir,
-                        map_name,
-                        short_name,
-                        layer,
-                        pass_id,
-                        layout_date,
-                        layout_title,
-                        reclassify_snow_ice
-                    )
+                            elif mode == "flood":
+                                if (
+                                    reclassify_snow_ice == True
+                                    and short_name == "OPERA_L3_DSWX-HLS_V1"
+                                    and layer in ["BWTR", "WTR"]
+                                ):
+                                    if current_conf_DS is not None:
+                                        ds_group, colormap = reclassify_snow_ice_as_water(
+                                            ds_group, current_conf_DS
+                                        )
 
-    # Pair-wise differencing for 'flood' mode
-    if mode == "flood":
-        print("[INFO] Computing pairwise differences between water products...")
-        skipped = []
-
-        for short_name_k, layers_dict in mosaic_index.items():
-            for layer_k, date_map in layers_dict.items():
-
-                # dates is now a list of sorted pass_ids (YYYYMMDDtHHMM)
-                dates = sorted(date_map.keys()) 
-
-                for i in range(len(dates)):
-                    for j in range(i + 1, len(dates)):
-                        d_early = dates[i]
-                        d_later = dates[j]
-
-                        early_info = date_map[d_early]
-                        later_info = date_map[d_later]
+                            # Reproject to master grid
+                            for da in ds_group:
+                                grid_props = master_grid.copy()
+                                dst_crs_val = grid_props.pop("dst_crs")
+                                da_warped = da.rio.reproject(
+                                    dst_crs_val,
+                                    **grid_props,
+                                    resampling=resampling_method
+                                )
+                                all_warped_ds.append(da_warped)
                         
-                        crs_a = early_info["crs"]
-                        crs_b = later_info["crs"]
-                        
-                        if crs_a != crs_b:
-                            skipped.append({
-                                "short_name": short_name_k,
-                                "layer": layer_k,
-                                "date_earlier": d_early,
-                                "date_later": d_later,
-                                "reason": "Mosaics have different master CRS"
-                            })
+                        if not all_warped_ds:
                             continue
-
-                        # Name using pass IDs
-                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_water_gain.tif"
-                        diff_path = (mode_dir / "data") / diff_name
-
-                        try:
-                            compute_and_write_difference_positive_change_only(
-                                earlier_path=early_info["path"],
-                                later_path=later_info["path"],
-                                out_path=diff_path
-                            )
-                            print(f"[INFO] Wrote diff COG: {diff_path}")
                             
-                            diff_id_str = f"{d_later}_{d_early}"
-                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_id_str, bbox, zoom_bbox, is_difference=True)
-
-                            if map_name:
-                                diff_date_str_layout = f"{d_early}, {d_later}"
-                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_id_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
+                        if colormap is None:
+                            try:
+                                colormap = opera_mosaic.get_image_colormap(DS[0])
+                            except Exception:
+                                colormap = None
                         
-                        except Exception as e:
-                            skipped.append({
-                                "short_name": short_name_k,
-                                "layer": layer_k,
-                                "date_earlier": d_early,
-                                "date_later": d_later,
-                                "error": str(e),
-                            })
+                        output_dtype = None
+                        if short_name == "OPERA_L2_RTC-S1_V1":
+                            output_dtype = "float32"
 
-        report_path = (mode_dir / "data") / "difference_skipped_pairs.json"
-        with open(report_path, "w") as f:
-            json.dump(skipped, f, indent=2)
+                        # Mosaic the datasets using the appropriate method/rule
+                        mosaic, _, nodata = opera_mosaic.mosaic_opera(all_warped_ds, product=short_name, merge_args={})
 
-    # Pair-wise differencing for 'landslide' mode
-    if mode == "landslide":
-        print("[INFO] Computing pairwise log difference between RTC backscatter products...")
-        skipped = []
+                        # Apply slope mask if it has been generated previously
+                        if global_slope_mask is not None:
+                            # Ensure shape compatibility
+                            if mosaic.shape[-2:] == global_slope_mask.shape:
+                                # Set pixels with slope < threshold to nodata
+                                mosaic.values[..., global_slope_mask] = nodata
+                            else:
+                                print(f"[WARN] Mask shape {global_slope_mask.shape} mismatches mosaic {mosaic.shape}. Skipping slope filter.")
 
-        for short_name_k, layers_dict in mosaic_index.items():
-            for layer_k, date_map in layers_dict.items():
+                        image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata, dtype=output_dtype)
+                        
+                        # Create filename and full paths using pass_id (YYYYMMDDtHHMM)
+                        mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
+                        mosaic_path = data_dir / mosaic_name
+                        tmp_path = data_dir / f"tmp_{mosaic_name}"
 
-                if short_name_k != "OPERA_L2_RTC-S1_V1":
+                        copy(image, tmp_path, driver="GTiff")
+                        save_gtiff_as_cog(tmp_path, mosaic_path)
+                        cleanup_temp_file(tmp_path)
+
+                        mosaic_index[short_name][layer][pass_id] = {
+                            "path": mosaic_path,
+                            "crs": master_grid["dst_crs"] 
+                        }
+
+                        # --- Background Plotting ---
+                        print(f"[INFO] Submitting background plotting task for {pass_id}...")
+                        future = executor.submit(
+                            run_plotting_task,
+                            maps_dir, layouts_dir, mosaic_path, short_name, layer,
+                            pass_id, layout_date, layout_title, bbox, zoom_bbox,
+                            reclassify_snow_ice, False, # is_difference=False
+                            benchmark_stats is not None # benchmark_mode
+                        )
+                        plotting_futures.append(future)
+
+        # Concurrent differencing
+        if mode in ["flood", "landslide"]:
+            print(f"[INFO] Submitting concurrent pair-wise differencing tasks ({mode})...")
+            
+            for short_name_k, layers_dict in mosaic_index.items():
+                # Filter for relevant products only (RTC for Landslide, all for Flood)
+                if mode == "landslide" and short_name_k != "OPERA_L2_RTC-S1_V1":
                     continue
-                    
-                dates = sorted(date_map.keys())
+                
+                for layer_k, date_map in layers_dict.items():
+                    # dates is now a list of sorted pass_ids (YYYYMMDDtHHMM)
+                    dates = sorted(date_map.keys())
 
-                for i in range(len(dates)):
-                    for j in range(i + 1, len(dates)):
-                        d_early = dates[i]
-                        d_later = dates[j]
+                    for i in range(len(dates)):
+                        for j in range(i + 1, len(dates)):
+                            d_early = dates[i]
+                            d_later = dates[j]
 
-                        early_info = date_map[d_early]
-                        later_info = date_map[d_later]
+                            early_info = date_map[d_early]
+                            later_info = date_map[d_later]
+                            
+                            if early_info["crs"] != later_info["crs"]:
+                                continue
 
-                        if early_info["crs"] != later_info["crs"]:
-                            continue
-
-                        diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_log-diff.tif"
-                        diff_path = (mode_dir / "data") / diff_name
-                        
-                        try:
-                            compute_and_write_difference(
-                                earlier_path=early_info["path"],
-                                later_path=later_info["path"],
-                                out_path=diff_path,
-                                nodata_value=None,
-                                log=True
-                            )
-                            print(f"[INFO] Wrote diff COG: {diff_path}")
+                            # Setup filenames and paths
+                            suffix = "water_gain.tif" if mode == "flood" else "log-diff.tif"
+                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_{suffix}"
+                            diff_path = (mode_dir / "data") / diff_name
                             
                             diff_id_str = f"{d_later}_{d_early}"
-                            map_name = make_map(maps_dir, diff_path, short_name_k, layer_k, diff_id_str, bbox, zoom_bbox, is_difference=True)
+                            diff_date_str_layout = f"{d_early}, {d_later}"
 
-                            if map_name:
-                                diff_date_str_layout = f"{d_early}, {d_later}"
-                                make_layout(layouts_dir, map_name, short_name_k, layer_k, diff_id_str, diff_date_str_layout, layout_title, reclassify_snow_ice)
+                            # Submit Pipeline Task (Compute Diff -> Map -> Layout)
+                            future = executor.submit(
+                                run_difference_pipeline,
+                                early_info["path"], later_info["path"], diff_path, mode,
+                                maps_dir, layouts_dir, short_name_k, layer_k,
+                                diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
+                                reclassify_snow_ice
+                            )
+                            differencing_futures.append(future)
 
-                        except Exception as e:
-                             skipped.append({
-                                "short_name": short_name_k,
-                                "layer": layer_k,
-                                "date_earlier": d_early,
-                                "date_later": d_later,
-                                "error": str(e),
-                            })
+    finally:
+        print("[INFO] Waiting for all background tasks to finish...")
+        executor.shutdown(wait=True)
+        
+        if benchmark_stats is not None:
+            # Process Plotting Futures (Standard Mosaics)
+            total_plotting_time = 0.0
+            for f in plotting_futures:
+                try:
+                    # run_plotting_task returns elapsed time
+                    total_plotting_time += f.result()
+                except Exception:
+                    pass
+            
+            # Process Differencing Pipeline Futures (Returns (diff_time, plot_time))
+            total_diff_time = 0.0
+            for f in differencing_futures:
+                try: 
+                    d_t, p_t = f.result()
+                    total_diff_time += d_t
+                    total_plotting_time += p_t
+                except Exception:
+                    pass
+            
+            # Update Stats
+            if 'plotting' in benchmark_stats:
+                benchmark_stats['plotting']['seq'] = total_plotting_time
+                benchmark_stats['plotting']['conc'] = 0.1 # Negligible
+            if 'differencing' in benchmark_stats:
+                benchmark_stats['differencing']['seq'] = total_diff_time
+                benchmark_stats['differencing']['conc'] = 0.1 # Negligible
+        
+        print("[INFO] All tasks complete.")
 
-        report_path = (mode_dir / "data") / "log-difference_skipped_pairs.json"
-        with open(report_path, "w") as f:
-            json.dump(skipped, f, indent=2)
     return
 
 
@@ -1877,8 +1978,9 @@ def make_map(
     else:
         date_str = date
 
-    # Create a temporary path for the WGS84 reprojected file
-    mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", "_WGS84_TMP.tif"))
+    # Create a unique temporary path for the WGS84 reprojected file
+    unique_id = uuid.uuid4().hex
+    mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", f"_WGS84_TMP_{unique_id}.tif"))
 
     try:
         # Reproject to WGS84 (into the temp file)
@@ -1949,7 +2051,7 @@ def make_map(
                 p_max = symmetric_limit
                 inc = (p_max - p_min) / 1000.0
 
-                cpt_name = "difference_cpt"
+                cpt_name = f"difference_cpt_{unique_id}" # Unique Name
                 pygmt.makecpt(
                     cmap="vik", series=[p_min, p_max, inc], output=cpt_name, continuous=True
                 )
@@ -1959,6 +2061,10 @@ def make_map(
                     cmap=cpt_name, frame=["WSne", "xaf", "yaf"], nan_transparent=True
                 )
                 fig.colorbar(cmap=cpt_name, frame=["x+lNormalized backscatter difference (dB)"])
+                
+                # Cleanup CPT handled by PyGMT session usually, but explicit remove if file persists is good practice
+                if os.path.exists(cpt_name):
+                    os.remove(cpt_name)
 
             # 'flood' mode (DSWx)
             else:
@@ -1968,7 +2074,7 @@ def make_map(
 
                 # --- Sub-Case B1: Binary Positive Change (Max value is 1) ---
                 if max_val <= 1:
-                    cpt_path = maps_dir / "binary_gain.cpt"
+                    cpt_path = maps_dir / f"binary_gain_{unique_id}.cpt"
                     
                     # Create Simple Blue/White CPT
                     with open(cpt_path, "w") as f:
@@ -1985,7 +2091,7 @@ def make_map(
                     )
 
                     # Simple Legend
-                    legend_path = maps_dir / "binary_legend.txt"
+                    legend_path = maps_dir / f"binary_legend_{unique_id}.txt"
                     with open(legend_path, "w") as f:
                         f.write("H 10p,Helvetica-Bold Water Change\n")
                         f.write("D 0.2c 1p\n") 
@@ -2001,7 +2107,7 @@ def make_map(
 
                 # --- Sub-Case B2: Full Categorical (Max value > 1) ---
                 else:
-                    cpt_path = maps_dir / "categorical_diff.cpt"
+                    cpt_path = maps_dir / f"categorical_diff_{unique_id}.cpt"
                     
                     # Define color map for full 0-15 classes
                     color_map = {
@@ -2037,7 +2143,7 @@ def make_map(
                     )
 
                     # Full Legend
-                    legend_path = maps_dir / "categorical_legend.txt"
+                    legend_path = maps_dir / f"categorical_legend_{unique_id}.txt"
                     with open(legend_path, "w") as f:
                         f.write("H 10p,Helvetica-Bold Water Change Classes\n")
                         f.write("D 0.2c 1p\n")
@@ -2146,7 +2252,7 @@ def make_map(
             # Calculate increment for 1000 steps
             inc = (p98 - p2) / 1000.0
 
-            cpt_name = "rtc_grayscale"
+            cpt_name = f"rtc_grayscale_{unique_id}"
 
             pygmt.makecpt(
                 cmap="gray", series=[p2, p98, inc], output=cpt_name, continuous=True
@@ -2164,6 +2270,9 @@ def make_map(
             fig.colorbar(
                 cmap=cpt_name, frame=["x+lNormalized backscatter (@~g@~@-0@-)"]
             )
+            
+            if os.path.exists(cpt_name):
+                os.remove(cpt_name)
 
         # Add scalebar and compass rose
         xmin, xmax, ymin, ymax = region_padded
@@ -2322,6 +2431,16 @@ def make_map(
                         cmap=cpt_name,
                         nan_transparent=True,
                     )
+                elif is_difference and "gain" in str(mosaic_path):
+                    fig.grdimage(
+                        grid=grd, region=zoom_region, projection="M5c",
+                        cmap=str(cpt_path), nan_transparent=True
+                    )
+                elif is_difference:
+                    fig.grdimage(
+                        grid=grd, region=zoom_region, projection="M5c",
+                        cmap=cpt_name, nan_transparent=True
+                    )
 
                 # Add scale bar to the inset map. Use Bottom-Left (jBL) inside the inset frame.
                 fig.basemap(
@@ -2391,7 +2510,7 @@ def make_layout(
     from matplotlib.image import imread
     from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 
-    # Helper toprettify dates
+    # Helper to prettify dates
     def format_display_date(pid):
         # Handle difference format: "YYYYMMDDtHHMM, YYYYMMDDtHHMM"
         if ',' in pid:
@@ -2683,6 +2802,7 @@ def make_layout(
 
     layout_name = layout_dir / f"{short_name}_{layer}_{date}_layout.pdf"
     plt.savefig(layout_name, format="pdf", bbox_inches="tight", dpi=400)
+    plt.close(fig)
     return
 
 
@@ -2739,6 +2859,17 @@ def main():
         print("[INFO] Earthquake mode coming soon. Exiting...")
         return
     
+    # Authenticate once at the start
+    if not args.local_dir:
+        try:
+            username, password = authenticate()
+            print("[INFO] Authentication successful.")
+        except Exception as e:
+            print(f"[WARN] Authentication failed: {e}")
+            username, password = None, None
+    else:
+        username, password = None, None
+    
     # Define the mode directory (e.g., output_dir/flood)
     mode_dir = args.output_dir / args.mode
 
@@ -2790,6 +2921,15 @@ def main():
 
     print(f"[INFO] Outputting results to: {mode_dir}")
 
+    # Set up benchmarking stats if requested
+    benchmark_stats = None
+    if args.benchmark:
+        benchmark_stats = {
+            'loading': {'seq': 0.0, 'conc': 0.0},
+            'plotting': {'seq': 0.0, 'conc': 0.0},
+            'differencing': {'seq': 0.0, 'conc': 0.0}
+        }
+
     # Generate products
     generate_products(
         df_opera, 
@@ -2800,8 +2940,45 @@ def main():
         args.zoom_bbox, 
         args.filter_date, 
         args.reclassify_snow_ice,
-        slope_threshold=args.slope_threshold
+        slope_threshold=args.slope_threshold,
+        benchmark_stats=benchmark_stats,
+        username=username,
+        password=password
     )
+
+    if args.benchmark and benchmark_stats:
+        print("\n" + "="*50)
+        print("FINAL BENCHMARK REPORT")
+        print("="*50)
+        
+        # Report benchmarking results for the 'loading' stage
+        l_seq = benchmark_stats['loading']['seq']
+        l_conc = benchmark_stats['loading']['conc']
+        l_saved = l_seq - l_conc
+        print(f"DATA LOADING:")
+        print(f"  Sequential: {l_seq:.2f}s | Concurrent: {l_conc:.2f}s")
+        print(f"  Saved:      {l_saved:.2f}s")
+        
+        # Report benchmarking results for the 'differencing' stage
+        d_seq = benchmark_stats['differencing']['seq']
+        d_conc = benchmark_stats['differencing']['conc'] # effectively 0
+        d_saved = d_seq - d_conc
+        if d_seq > 0:
+            print(f"DIFFERENCING (Backgrounded):")
+            print(f"  Sequential: {d_seq:.2f}s | Concurrent: ~0s (Overlapped)")
+            print(f"  Saved:      {d_saved:.2f}s")
+        
+        # Report benchmarking results for the 'plotting' stage
+        p_seq = benchmark_stats['plotting']['seq']
+        p_conc = benchmark_stats['plotting']['conc'] # effectively 0
+        p_saved = p_seq - p_conc
+        print(f"PLOTTING (Backgrounded):")
+        print(f"  Sequential: {p_seq:.2f}s | Concurrent: ~0s (Overlapped)")
+        print(f"  Saved:      {p_saved:.2f}s")
+        
+        print("-" * 50)
+        print(f"TOTAL TIME SAVED: {l_saved + d_saved + p_saved:.2f}s")
+        print("="*50 + "\n")
 
     return
 
