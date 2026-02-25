@@ -1492,6 +1492,7 @@ def generate_products(
     import opera_mosaic
     from pyproj import CRS
     from rasterio.enums import Resampling
+    import multiprocessing
 
     # Create data directory
     data_dir = mode_dir / "data"
@@ -1561,7 +1562,8 @@ def generate_products(
     mosaic_index = defaultdict(lambda: defaultdict(dict))
     
     # Initialize Executor for Plotting and Differencing
-    executor = concurrent.futures.ProcessPoolExecutor(max_workers=4) 
+    ctx = multiprocessing.get_context('spawn')
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=4, mp_context=ctx)
     plotting_futures = []
     differencing_futures = []
 
