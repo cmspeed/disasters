@@ -1410,6 +1410,49 @@ def run_difference_pipeline(
     return t_diff, t_plot
 
 
+def generate_coastal_mask(bbox, master_grid):
+    """
+    Generates a coastal mask using PyGMT's global coastline database.
+    Returns a boolean xarray DataArray where True = Land/Inland Water, False = Ocean.
+    """
+    import pygmt
+    from rasterio.enums import Resampling
+
+    print("[INFO] Generating global coastal water mask using PyGMT...")
+    
+    # bbox is [South, North, West, East]
+    # pygmt region is [xmin, xmax, ymin, ymax]
+    region = [bbox[2], bbox[3], bbox[0], bbox[1]]
+
+    try:
+        # mask_values=[ocean, land, lake, island, pond]
+        # 0 for ocean, 1 for everything else to preserve inland water
+        mask_geo = pygmt.grdlandmask(
+            region=region,
+            spacing='30e',  
+            maskvalues=[0, 1, 1, 1, 1],
+            resolution='f'
+        )
+        
+        # Assign CRS so rioxarray can reproject it
+        mask_geo = mask_geo.rio.write_crs("EPSG:4326")
+
+        # Reproject to align exactly with the master UTM grid
+        mask_utm = mask_geo.rio.reproject(
+            master_grid['dst_crs'],
+            shape=master_grid['shape'],
+            transform=master_grid['transform'],
+            resampling=Resampling.nearest
+        )
+        
+        # Squeeze to 2D boolean mask (True for valid land/inland water)
+        return mask_utm.squeeze() == 1
+
+    except Exception as e:
+        print(f"[WARN] Failed to generate PyGMT coastal mask: {e}")
+        return None
+    
+
 def generate_products(
     df_opera,
     mode,
@@ -1485,6 +1528,9 @@ def generate_products(
             slope_threshold, 
             data_dir 
         )
+
+    # Generate Global Coastal Mask
+    global_coastal_mask = generate_coastal_mask(bbox, master_grid)
 
     # Define the resampling method.
     if mode == "landslide":
@@ -1746,6 +1792,14 @@ def generate_products(
                                 mosaic.values[..., global_slope_mask] = nodata
                             else:
                                 print(f"[WARN] Mask shape {global_slope_mask.shape} mismatches mosaic {mosaic.shape}. Skipping slope filter.")
+
+                        # Apply coastal mask to ocean pixels
+                        if global_coastal_mask is not None:
+                            if mosaic.shape[-2:] == global_coastal_mask.shape:
+                                # Mask out ocean (where global_coastal_mask is False)
+                                mosaic.values[..., ~global_coastal_mask.values] = nodata
+                            else:
+                                print(f"[WARN] Coastal mask shape mismatches mosaic. Skipping coastal filter.")
 
                         image = opera_mosaic.array_to_image(mosaic, colormap=colormap, nodata=nodata, dtype=output_dtype)
                         
