@@ -1,0 +1,31 @@
+# Ignore Python caches and packaging 
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Ignore virtual Environments
+venv/
+.venv/
+env/
+
+# Ignore IDE & OS files
+.vscode/
+.idea/
+.ipynb_checkpoints/
+.DS_Store
+
+# Ignore credentials/Cookies
+cookies.txt
+.env
+
+# Ignore satellite data or local test outputs
+*.tif
+*.tiff
+*.nc
+*.h5
+
+# Ignore temporary pipeline artifacts
+*.tmp.tif
+*difference_skipped_pairs.json

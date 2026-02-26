@@ -28,37 +28,38 @@ We recommend using **Mamba** for faster environment setup.
 ### Prerequisite installs
 1. Download source code:
 ```bash
-git clone https://github.com/cmspeed/disasters
+git clone [https://github.com/OPERA-Cal-Val/disasters](https://github.com/OPERA-Cal-Val/disasters)
 ```
 
-2. Navigate to and install dependencies, using the included `environment.yml` file:
+2. Navigate to the repository, install dependencies using the included environment.yml file, and install the package:
 
 ```bash
 cd disasters
 mamba env create --file environment.yml
 mamba activate disasters
+pip install -e .
 ```
-The provided `environment.yml` file sets up a fully functional environment with all required packages.
+The provided environment.yml file sets up a fully functional environment, and the pip install command makes the opera-disaster CLI tool available system-wide.
 
 ### Usage
 
 #### Example: Generate flood maps over Lake Mead, Nevada using the two most recent OPERA products
 ```bash
-python disaster.py -b 35 37 -115 -113 -o LakeMead -m flood -n 2 -lt "Lake Mead Floods"
+opera-disaster run -b 35 37 -115 -113 -o LakeMead -m flood -n 2 -lt "Lake Mead Floods"
 ```
 #### Example: Generate fire impact maps over New Mexico using the five (default) most recent OPERA products
 ```bash
-python disaster.py -b 32 34 -106.5 -104 -o NM_Fires -m fire -lt "New Mexico Fires, June 2025"
+opera-disaster run -b 32 34 -106.5 -104 -o NM_Fires -m fire -lt "New Mexico Fires, June 2025"
 ```
 
 #### Example: Generate fire impact maps over a wildfire in Quebec using the most recent 30 OPERA products (prior to 07-31-2023), filtered to remove disturbance prior to 05-15-2023
 ```bash
-python disaster.py -b 48 49.5 -77.5 -74.4 -o QuebecFires -m fire -d 2023-07-31 -n 30 -lt "Quebec Wildfire, Summer 2023" -fd 2023-05-15
+opera-disaster run -b 48 49.5 -77.5 -74.4 -o QuebecFires -m fire -d 2023-07-31 -n 30 -lt "Quebec Wildfire, Summer 2023" -fd 2023-05-15
 ```
 
 #### Example: Generate landslide impact maps over a landslide in Brazil in February 2023, retaining only pixels with slopes greater than 15 degrees (slope filtering is optional)
 ```bash
-python disaster.py -b -24 -23.5 -45.75 -45.5 -o brazil_landslides -m landslide -lt "Brazil Landslides, Feb. 2023" -fd 2023-02-01 -d 2023-03-01 -zb -23.783 -23.733 -45.733 -45.683 -st 15
+opera-disaster run -b -24 -23.5 -45.75 -45.5 -o brazil_landslides -m landslide -lt "Brazil Landslides, Feb. 2023" -fd 2023-02-01 -d 2023-03-01 -zb -23.783 -23.733 -45.733 -45.683 -st 15
 
 ```
 
@@ -66,13 +67,13 @@ python disaster.py -b -24 -23.5 -45.75 -45.5 -o brazil_landslides -m landslide -
 In this example, misclassified snow/ice classified pixels (likely sediment-rich water) are reclassified to open water using the DIST-HLS Confidence layer.
 Note: All snow/ice/sediment-rich water pixels are not reclassified using this approach.
 ```bash
-python disaster.py -b 17.3 18.8 -78.6 -75.6 -m flood -o hurricane_melissa_Oct2025 -rc -lt "Hurricane Melissa, Oct. 2025"
+opera-disaster run -b 17.3 18.8 -78.6 -75.6 -m flood -o hurricane_melissa_Oct2025 -rc -lt "Hurricane Melissa, Oct. 2025"
 ```
 
 #### Example: Generate disturbance maps over Jamaica for Hurricane Melissa in October 2025
 In this example, a filter data (`-fd`) of October 28, 2025 (coinciding with hurricane landfall) is applied. All disturbance prior to this date is filtered out of the final mosaics.
 ```bash
-python disaster.py -b 17.3 18.8 -78.6 -75.6 -m fire -o hurricane_melissa_Oct2025 -lt "Hurricane Melissa, Oct. 2025" -fd 2025-10-28
+opera-disaster run -b 17.3 18.8 -78.6 -75.6 -m fire -o hurricane_melissa_Oct2025 -lt "Hurricane Melissa, Oct. 2025" -fd 2025-10-28
 ```
 
 ### Running with Local Data
@@ -81,7 +82,7 @@ You can process pre-downloaded OPERA GeoTIFFs stored on your local machine by us
 
 #### Basic Local Usage
 ```bash
-python disaster.py -b 35 37 -115 -113 -ld /path/to/my/data -o LocalOutput -m flood -lt "Local Test"
+opera-disaster run -b 35 37 -115 -113 -ld /path/to/my/data -o LocalOutput -m flood -lt "Local Test"
 ```
 
 **Note:** The bounding box (`-b`) is still required to define the map extent and master grid alignment.

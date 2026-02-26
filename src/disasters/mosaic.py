@@ -1,11 +1,322 @@
+import concurrent.futures
+import logging
+import os
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import pyproj
 import rasterio
 import rioxarray
 import xarray as xr
+from rasterio.transform import Affine
 from rioxarray.merge import merge_arrays
+from opera_utils.disp._remote import open_file
+
+from .auth import authenticate
+
+logger = logging.getLogger(__name__)
 
 
-def mosaic_opera(DS, product="OPERA_L3_DSWX-S1_V1", merge_args={}):
-    """Mosaics a list of OPERA product granules into a single image (in memory).
+def get_master_crs(df_opera: pd.DataFrame, mode: str) -> Optional[str]:
+    """
+    Scans all relevant product URLs in the DataFrame to find the most common UTM CRS.
+    This defines the single global master grid for the entire time series.
+
+    Args:
+        df_opera (pd.DataFrame): DataFrame containing metadata and URLs.
+        mode (str): Mode of operation.
+
+    Returns:
+        str or None: PROJ4 string representing the most common CRS.
+    """
+    logger.info("Scanning all granules to determine Global Master CRS...")
+    
+    # Collect all unique URLs relevant to the mode
+    all_urls = []
+    
+    # Define columns to check based on mode
+    if mode == "flood":
+        cols = ["Download URL WTR", "Download URL BWTR"]
+    elif mode == "fire":
+        cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS"]
+    elif mode == "landslide":
+        cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS", "Download URL RTC-VV", "Download URL RTC-VH"]
+    else:
+        return None
+
+    for col in cols:
+        if col in df_opera.columns:
+            all_urls.extend(df_opera[col].dropna().tolist())
+
+    # Remove duplicates
+    all_urls = list(set(all_urls))
+    
+    # Filter for S1A vs S1C if both exist (keep most common platform)
+    satellite_counts = Counter()
+    for link in all_urls:
+        if 'S1A' in link: satellite_counts['S1A'] += 1
+        elif 'S1C' in link: satellite_counts['S1C'] += 1
+    
+    if satellite_counts:
+        most_common_sat, _ = satellite_counts.most_common(1)[0]
+        all_urls = [u for u in all_urls if most_common_sat in u]
+
+    crs_counter = Counter()
+
+    # Open files to check CRS (metadata read only). Sample only first 50.
+    sample_size = min(len(all_urls), 50) 
+    
+    logger.info(f"Checking CRS of {sample_size} representative granules...")
+    
+    # For this check, we authenticate locally just for this function if needed
+    try:
+        username, password = authenticate()
+    except Exception:
+        username, password = None, None
+
+    for i, url in enumerate(all_urls[:sample_size]):
+        try:
+            # Try direct open (local/s3)
+            with rioxarray.open_rasterio(url, masked=False) as ds:
+                crs_counter[str(ds.rio.crs)] += 1
+        except Exception:
+            try:
+                # Try via earthaccess/opera_utils
+                f = open_file(url, earthdata_username=username, earthdata_password=password)
+                with rioxarray.open_rasterio(f, masked=False) as ds:
+                    crs_counter[str(ds.rio.crs)] += 1
+            except Exception:
+                continue
+                
+    if not crs_counter:
+        raise RuntimeError("Could not determine CRS from any granules.")
+
+    # Get the most common CRS
+    most_common_crs_str, count = crs_counter.most_common(1)[0]
+    
+    # Convert to PROJ4 string for consistency
+    proj4_str = pyproj.CRS.from_string(most_common_crs_str).to_proj4()
+
+    logger.info(f"Global Master CRS determined: {proj4_str} (found in {count}/{sample_size} granules)")
+    return proj4_str
+
+
+def get_master_grid_props(bbox_latlon: list, target_crs_proj4: str, target_res: int = 30) -> dict:
+    """
+    Defines a master pixel-aligned grid based on a lat/lon BBOX and target CRS.
+
+    Args:
+        bbox_latlon (list): Bounding box [S, N, W, E] in EPSG:4326.
+        target_crs_proj4 (str): The PROJ4 string for the target master CRS.
+        target_res (int): The target resolution in meters.
+
+    Returns:
+        dict: A dictionary with 'dst_crs', 'shape', 'transform' for rioxarray.reproject.
+    """
+    # Define transformers
+    transformer = pyproj.Transformer.from_crs(
+        "EPSG:4326", target_crs_proj4, always_xy=True
+    )
+    
+    # Get corners in target CRS
+    corners_lon = [bbox_latlon[2], bbox_latlon[3], bbox_latlon[3], bbox_latlon[2]]
+    corners_lat = [bbox_latlon[0], bbox_latlon[0], bbox_latlon[1], bbox_latlon[1]]
+    
+    xs, ys = transformer.transform(corners_lon, corners_lat)
+
+    # Find min/max of transformed coordinates
+    xmin = min(xs)
+    ymin = min(ys)
+    xmax = max(xs)
+    ymax = max(ys)
+
+    # Snap extent to be pixel-aligned to the resolution, ensuring any grid defined this way will be aligned.
+    xmin = np.floor(xmin / target_res) * target_res
+    ymin = np.floor(ymin / target_res) * target_res
+    xmax = np.ceil(xmax / target_res) * target_res
+    ymax = np.ceil(ymax / target_res) * target_res
+
+    # Calculate final width and height in pixels
+    width = int((xmax - xmin) / target_res)
+    height = int((ymax - ymin) / target_res)
+
+    # Create the GDAL/Rasterio Affine transform
+    transform = Affine.translation(xmin, ymax) * Affine.scale(target_res, -target_res)
+
+    return {
+        "dst_crs": target_crs_proj4,
+        "shape": (height, width),
+        "transform": transform,
+    }
+
+
+def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None, benchmark_stats=None, username=None, password=None):
+    """
+    Compile and load data from the provided layer links for mosaicking using multithreading.
+    
+    Args:
+        data_layer_links (list): List of URLs corresponding to the OPERA data layers to mosaic.
+        mode (str): Mode of operation, e.g., "flood", "fire", "landslide", "earthquake".
+        conf_layer_links (list, optional): List of URLs for additional layers to filter false positives.
+        date_layer_links (list, optional): List of URLs for date layers to filter by date.
+        benchmark_stats (dict, optional): Mutable dictionary to track benchmarking stats. 
+                                          If provided, enables benchmark mode.
+        username (str, optional): Earthdata username.
+        password (str, optional): Earthdata password.
+
+    Returns:
+        list or tuple: List of rioxarray datasets loaded from the provided links (in granule order).
+                       May also return conf_DS and date_DS if applicable.
+    """
+    # If the first link exists as a local path, assume all are local and skip auth.
+    is_local = False
+    if data_layer_links and Path(data_layer_links[0]).exists():
+        is_local = True
+        logger.info("Local files detected. Skipping Earthdata authentication.")
+    else:
+        # If credentials weren't passed, authenticate (fallback)
+        if not username or not password:
+             username, password = authenticate()
+
+    # Ensure only S1A or S1C are used (not both) for a single date
+    satellite_counts = Counter()
+    for link in data_layer_links:
+        if "S1A" in link:
+            satellite_counts["S1A"] += 1
+        elif "S1C" in link:
+            satellite_counts["S1C"] += 1
+
+    if satellite_counts:
+        # Get the satellite type with the highest count
+        most_common_satellite, _ = satellite_counts.most_common(1)[0]
+        logger.info(
+            f"Most common satellite type: {most_common_satellite}, keeping only those links."
+        )
+
+        # Create a boolean mask to filter all lists consistently
+        is_most_common = [most_common_satellite in link for link in data_layer_links]
+
+        data_layer_links = [
+            link for i, link in enumerate(data_layer_links) if is_most_common[i]
+        ]
+
+        # Filter auxiliary links consistently if they exist
+        if conf_layer_links:
+            conf_layer_links = [link for i, link in enumerate(conf_layer_links) if is_most_common[i]]
+        if date_layer_links:
+            date_layer_links = [link for i, link in enumerate(date_layer_links) if is_most_common[i]]
+
+    # Define helpers for loading data
+    def _load_single(link):
+        """Helper to load a single dataset, handling auth fallback."""
+        try:
+            return rioxarray.open_rasterio(link, masked=False)
+        except Exception:
+            f = open_file(link, earthdata_username=username, earthdata_password=password)
+            return rioxarray.open_rasterio(f, masked=False)
+
+    def _run_sequential(links):
+        """Sequential loading for benchmarking."""
+        return [_load_single(link) for link in links]
+
+    def _run_concurrent(links):
+        """Concurrent loading using ThreadPoolExecutor."""
+        if not links:
+            return []
+        max_workers = min(20, len(links))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            return list(executor.map(_load_single, links))
+
+    def load_datasets(links, label="Dataset"):
+        """Orchestrates loading. If benchmark_stats is set, runs both and tracks cumulative stats."""
+        if not links:
+            return []
+            
+        if benchmark_stats is not None:
+            print(f"\n[BENCHMARK] Testing load speeds for {len(links)} items ({label})...")
+            
+            # Run Sequential
+            t0 = time.time()
+            _ = _run_sequential(links)
+            t_seq = time.time() - t0
+            
+            # Run Concurrent
+            t0 = time.time()
+            results = _run_concurrent(links)
+            t_conc = time.time() - t0
+            
+            # Update Globals - Using the 'loading' key
+            if 'loading' in benchmark_stats:
+                benchmark_stats['loading']['seq'] += t_seq
+                benchmark_stats['loading']['conc'] += t_conc
+                
+                # Calculate metrics for printout
+                cum_seq = benchmark_stats['loading']['seq']
+                cum_conc = benchmark_stats['loading']['conc']
+                cum_saved = cum_seq - cum_conc
+                cum_speedup = cum_seq / cum_conc if cum_conc > 0 else 0
+            else:
+                # Fallback if structure is simple
+                cum_saved = 0
+                cum_speedup = 0
+            
+            # Calculate local metrics
+            speedup = t_seq / t_conc if t_conc > 0 else 0
+            saved = t_seq - t_conc
+            
+            print(f"   - Sequential: {t_seq:.2f}s")
+            print(f"   - Concurrent: {t_conc:.2f}s")
+            print(f"   >>> SPEEDUP: {speedup:.2f}x (Saved {saved:.2f}s)")
+            if 'loading' in benchmark_stats:
+                print(f"   [CUMULATIVE] Total Saved: {cum_saved:.2f}s | Global Speedup: {cum_speedup:.2f}x")
+            print("-" * 50)
+            
+            return results
+        else:
+            # Standard fast path (concurrent only)
+            logger.info(f"Loading {len(links)} granules concurrently...")
+            return _run_concurrent(links)
+    
+    # Load the primary data layer (DS)
+    DS = load_datasets(data_layer_links, label="Primary Data")
+
+    # If conf_layer_links AND mode == 'flood'
+    if conf_layer_links and mode == "flood":
+        conf_DS = load_datasets(conf_layer_links, label="Confidence")
+        return DS, conf_DS
+
+    # If conf_layer_links AND date_layer_links AND mode == 'fire' or 'landslide'
+    if (conf_layer_links and date_layer_links and (mode == "fire" or mode == "landslide")):
+        date_DS = load_datasets(date_layer_links, label="Date")
+        conf_DS = load_datasets(conf_layer_links, label="Confidence")
+        return DS, date_DS, conf_DS
+    else:
+        return DS
+
+
+def same_utm_zone(crs_a, crs_b) -> bool:
+    """
+    Check if two CRS strings belong to the same UTM zone.
+
+    Args:
+        crs_a (str or pyproj.CRS): First CRS.
+        crs_b (str or pyproj.CRS): Second CRS.
+
+    Returns:
+        bool: True if they are functionally equal.
+    """
+    if crs_a is None or crs_b is None:
+        return False
+    return str(crs_a) == str(crs_b)
+
+
+def mosaic_opera(DS: list, product: str = "OPERA_L3_DSWX-S1_V1", merge_args: dict = {}) -> Tuple[xr.DataArray, Optional[dict], float]:
+    """
+    Mosaics a list of OPERA product granules into a single image (in memory).
 
     Args:
         DS (list): A list of OPERA product granules opened as xarray.DataArray objects.
@@ -19,9 +330,6 @@ def mosaic_opera(DS, product="OPERA_L3_DSWX-S1_V1", merge_args={}):
         colormap: A colormap for the mosaic, if in the original OPERA metadata, otherwise None.
         nodata: The nodata value for the mosaic corresponding to the original OPERA product granule metadata.
     """
-    import numpy as np
-    from rioxarray.merge import merge_arrays
-
     DA = []
     for ds in DS:
         nodata = ds.rio.nodata
@@ -59,6 +367,8 @@ def mosaic_opera(DS, product="OPERA_L3_DSWX-S1_V1", merge_args={}):
         }
     elif product.startswith("OPERA_L2_RTC"):
         priority = {}
+    else:
+        priority = {}
 
     valid_values = set(priority.keys())
 
@@ -79,13 +389,16 @@ def mosaic_opera(DS, product="OPERA_L3_DSWX-S1_V1", merge_args={}):
     return merged_arr, colormap, nodata
 
 
-def opera_rules(product="OPERA_L3_DSWX-S1_V1", nodata=255):
-    """Returns a custom callabale rasterio.merge method for OPERA products using pixel priority rules.
+def opera_rules(product: str = "OPERA_L3_DSWX-S1_V1", nodata: int = 255):
+    """
+    Returns a custom callabale rasterio.merge method for OPERA products using pixel priority rules.
+    
     Args:
         product (str): OPERA product short name, used to determine pixel prioritization in regions of OPERA granule overlap.
             Options include: "OPERA_L3_DSWX-HLS_V1","OPERA_L3_DSWX-S1_V1", "OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ANN-HLS_V1", "OPERA_L2_RTC-S1_V1"
             Default: "OPERA_L3_DSWX-S1_V1"
         nodata (int): The nodata value for the OPERA product. Default is 255.
+        
     Returns:
         method (function): A function that implements the custom merge method for the specified OPERA product.
     """
@@ -161,8 +474,6 @@ def opera_rules(product="OPERA_L3_DSWX-S1_V1", nodata=255):
         Returns:
             numpy.ndarray: The merged data array.
         """
-        import numpy as np
-
         max_val = max(priority.keys()) + 1
         priority_array = np.full(max_val, -1, dtype=np.int16)
         for val, pri in priority.items():
@@ -187,9 +498,17 @@ def opera_rules(product="OPERA_L3_DSWX-S1_V1", nodata=255):
     return method
 
 
-def contains_unexpected_values(DA, valid_values):
-    import numpy as np
+def contains_unexpected_values(DA: list, valid_values: set) -> bool:
+    """
+    Check if any DataArray contains non-valid values.
 
+    Args:
+        DA (list): List of DataArrays.
+        valid_values (set): Set of expected valid pixel values.
+
+    Returns:
+        bool: True if unexpected values are found, False otherwise.
+    """
     for da in DA:
         unique_vals = np.unique(da.values)
         if not set(unique_vals).issubset(valid_values):
@@ -197,7 +516,7 @@ def contains_unexpected_values(DA, valid_values):
     return False
 
 
-def get_image_colormap(image, index=1):
+def get_image_colormap(image, index: int = 1) -> Optional[dict]:
     """
     Retrieve the colormap from an image.
 
@@ -215,10 +534,6 @@ def get_image_colormap(image, index=1):
     Raises:
         ValueError: If the input image type is unsupported.
     """
-    import rasterio
-    import rioxarray
-    import xarray as xr
-
     dataset = None
 
     if isinstance(image, str):  # File path
@@ -257,7 +572,8 @@ def array_to_memory_file(
     colormap: dict = None,
     **kwargs,
 ):
-    """Convert a NumPy array to a memory file.
+    """
+    Convert a NumPy array to a memory file.
 
     Args:
         array (numpy.ndarray): The input NumPy array.
@@ -276,11 +592,6 @@ def array_to_memory_file(
     Returns:
         rasterio.DatasetReader: The rasterio dataset reader object for the converted array.
     """
-    import numpy as np
-    import rasterio
-    import xarray as xr
-    from rasterio.transform import Affine
-
     if isinstance(array, xr.DataArray):
         coords = [coord for coord in array.coords]
         if coords[0] == "time":
@@ -427,13 +738,6 @@ def array_to_image(
         colormap (dict, optional): A dictionary defining the colormap (value: (R, G, B, A)).
         **kwargs: Additional keyword arguments to be passed to the rasterio.open() function.
     """
-
-    import numpy as np
-    import rasterio
-    import rioxarray
-    import xarray as xr
-    from rasterio.transform import Affine
-
     if output is None:
         return array_to_memory_file(
             array,
@@ -474,8 +778,6 @@ def array_to_image(
             array.rio.to_raster(
                 output, driver=driver, compress=compress, dtype=dtype, **kwargs
             )
-            if colormap:
-                write_image_colormap(output, colormap, output)
             return output
 
     if array.ndim == 3 and transpose:
