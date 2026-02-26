@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opera-disaster"
+version = "0.1.0"
+description = "An automated workflow for generating disaster response maps and layouts using NASA-JPL OPERA products."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas",
+    "numpy",
+    "rasterio",
+    "rioxarray",
+    "xarray",
+    "earthaccess",
+    "boto3",
+    "pygmt",
+    "matplotlib",
+    "opera-utils",
+    "openpyxl",
+    "click"
+]
+
+[project.scripts]
+opera-disaster = "disasters.cli:cli"
+
+[tool.setuptools.package-data]
+"disasters.assets.logos" = ["*.png"]
+"disasters.assets.palettes" = ["*.cpt"]
