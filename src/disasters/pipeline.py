@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 import next_pass
+import numpy as np
 import pyproj
 import rasterio
 from osgeo import gdal
@@ -335,6 +336,103 @@ def generate_products(
                         logger.info(f"Found {len(urls)} URLs for this pass")
 
                         layout_date = ""
+
+                        # Use GDAL Direct-to-Disk Mosaicking for RTC to conserve RAM
+                        if short_name == "OPERA_L2_RTC-S1_V1":
+                            logger.info("Using GDAL Direct-to-Disk mosaicking for RTC to conserve RAM.")
+                            
+                            # Provide GDAL with Earthdata Authentication
+                            cookies_path = str(Path("cookies.txt").resolve())
+                            gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookies_path)
+                            gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookies_path)
+                            gdal.SetConfigOption("GDAL_HTTP_NETRC", "YES")
+                            gdal.PushErrorHandler('CPLQuietErrorHandler')
+
+                            # Extract bounds from master_grid for exact pixel alignment
+                            height, width = master_grid['shape']
+                            transform = master_grid['transform']
+                            min_x = transform.c
+                            max_y = transform.f
+                            max_x = min_x + (transform.a * width)
+                            min_y = max_y + (transform.e * height)
+                            output_bounds = [min_x, min_y, max_x, max_y]
+
+                            mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
+                            mosaic_path = data_dir / mosaic_name
+                            tmp_path = data_dir / f"tmp_{mosaic_name}"
+
+                            # Safely open datasets to avoid GDALDatasetShadow errors
+                            opened_datasets = []
+                            for u in urls:
+                                vsi_url = f"/vsicurl/{u}" if u.startswith("http") and not u.startswith("/vsi") else u
+                                ds = gdal.Open(vsi_url)
+                                if ds is None:
+                                    logger.warning(f"GDAL failed to open URL (likely auth or missing file), skipping: {vsi_url}")
+                                    continue
+                                opened_datasets.append(ds)
+
+                            gdal.PopErrorHandler()
+
+                            if not opened_datasets:
+                                logger.error(f"No valid datasets could be opened for pass {pass_id}. Skipping.")
+                                continue
+
+                            # Define Memory-Capped GDAL Warp Options
+                            warp_options = gdal.WarpOptions(
+                                format='GTiff',
+                                outputBounds=output_bounds,
+                                width=width,
+                                height=height,
+                                dstSRS=master_grid['dst_crs'],
+                                resampleAlg='bilinear',
+                                dstNodata=np.nan,
+                                creationOptions=["COMPRESS=DEFLATE", "NUM_THREADS=ALL_CPUS"],
+                                warpOptions=["NUM_THREADS=ALL_CPUS"],
+                                warpMemoryLimit=4096, # Cap RAM usage at 4GB
+                                outputType=gdal.GDT_Float32
+                            )
+                            
+                            # Execute Warp straight to disk using the opened datasets
+                            gdal.Warp(str(tmp_path), opened_datasets, options=warp_options)
+
+                            # Explicitly close datasets to free C++ memory!
+                            for ds in opened_datasets:
+                                ds = None
+                            opened_datasets = []
+
+                            # Apply optional masks quickly to the single, cropped temp file
+                            if global_slope_mask is not None or global_coastal_mask is not None:
+                                with rasterio.open(tmp_path, "r+") as ds:
+                                    arr = ds.read(1)
+                                    if global_slope_mask is not None and arr.shape == global_slope_mask.shape:
+                                        arr[global_slope_mask] = np.nan
+                                    if global_coastal_mask is not None and arr.shape == global_coastal_mask.shape:
+                                        arr[~global_coastal_mask.values] = np.nan
+                                    ds.write(arr, 1)
+
+                            # Convert to COG
+                            save_gtiff_as_cog(tmp_path, mosaic_path)
+                            cleanup_temp_file(tmp_path)
+
+                            # Register to index for downstream differencing
+                            mosaic_index[short_name][layer][pass_id] = {
+                                "path": mosaic_path,
+                                "crs": master_grid["dst_crs"]
+                            }
+
+                            # Submit Plotting Task
+                            logger.info(f"Submitting background plotting task for {pass_id}...")
+                            future = executor.submit(
+                                run_plotting_task,
+                                maps_dir, layouts_dir, mosaic_path, short_name, layer,
+                                pass_id, layout_date, layout_title, bbox, zoom_bbox,
+                                reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
+                            )
+                            plotting_futures.append(future)
+
+                            continue # Skip the xarray processing loops entirely for RTC
+
+                        # For non-RTC products, we load the data into xarray for filtering and reclassification before mosaicking
                         DS, conf_DS, date_DS = None, None, None
 
                         if mode == "fire":
@@ -371,9 +469,6 @@ def generate_products(
                                 else:
                                     date_threshold = 0
                                     layout_date = "All Dates"
-
-                            elif short_name == "OPERA_L2_RTC-S1_V1":
-                                DS = compile_and_load_data(urls, mode, benchmark_stats=benchmark_stats, username=username, password=password)
 
                         elif mode == "flood":
                             conf_column = "Download URL CONF"
@@ -484,7 +579,8 @@ def generate_products(
                         # Save the mosaic to a temporary GeoTIFF
                         copy(image, tmp_path, driver="GTiff")
                         warp_args = {"xRes": 30, "yRes": 30, "creationOptions": ["COMPRESS=DEFLATE"]}
-                        if short_name.startswith("OPERA_L2_RTC"): warp_args["outputType"] = gdal.GDT_Float32
+                        if short_name.startswith("OPERA_L2_RTC"): 
+                            warp_args["outputType"] = gdal.GDT_Float32
                         
                         # Reproject/compress using GDAL directly into the final GeoTIFF
                         gdal.Warp(str(mosaic_path), str(tmp_path), **warp_args)
