@@ -19,7 +19,10 @@ from rasterio.shutil import copy
 
 from .auth import authenticate
 from .catalog import cluster_by_time, read_opera_metadata
-from .diff import compute_and_write_difference, compute_and_write_difference_positive_change_only, save_gtiff_as_cog
+from .diff import (compute_and_write_difference,
+                   compute_and_write_difference_positive_change_only,
+                   save_gtiff_as_cog, create_rtc_rgb_visualization
+)
 from .filters import (
     compute_date_threshold,
     filter_by_date_and_confidence,
@@ -33,10 +36,11 @@ from .mosaic import array_to_image, compile_and_load_data, get_master_crs, get_m
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class PipelineConfig:
-    """Configuration for running the OPERA disaster pipeline."""
+    """
+    Configuration for running the OPERA disaster pipeline.
+    """
     bbox: Sequence[float]
     output_dir: Path
     layout_title: str
@@ -56,11 +60,15 @@ class PipelineConfig:
 
 
 def run_pipeline(config: PipelineConfig) -> Path | None:
-    """Run the end-to-end disaster pipeline (CLI-independent).
+    """
+    Run the end-to-end disaster pipeline (CLI-independent).
+
+    Args:
+        config (PipelineConfig): Configuration parameters for the pipeline execution.
 
     Returns:
-        Path or None: The mode directory path (e.g., `<output_dir>/flood`) if the pipeline ran,
-            or None if exited early (e.g., earthquake mode).
+        Path | None: The mode directory path (e.g., `<output_dir>/flood`) if the pipeline ran, 
+                     or None if exited early (e.g., earthquake mode).
     """
     if config.mode == "earthquake":
         logger.info("Earthquake mode coming soon. Exiting...")
@@ -181,7 +189,24 @@ def run_plotting_task(
 ) -> float:
     """
     Wrapper function to run map and layout generation in a separate process.
-    Returns elapsed time if successful, 0.0 otherwise.
+
+    Args:
+        maps_dir (Path): Directory to save output map images.
+        layouts_dir (Path): Directory to save output layouts.
+        mosaic_path (Path): Path to the generated GeoTIFF mosaic.
+        short_name (str): Product short name (e.g., OPERA_L3_DSWX-HLS_V1).
+        layer (str): Specific layer being mapped.
+        date_id (str): Formatted pass string.
+        layout_date (str): Title string for the layout date.
+        layout_title (str): Title string for the final layout.
+        bbox (list[float]): Boundary box coordinates for mapping.
+        zoom_bbox (list[float] | None): Inset boundary box coordinates for zooming.
+        reclassify_snow_ice (bool): Reclassification flag.
+        is_difference (bool): Flag indicating if this is a diff map.
+        benchmark_mode (bool): Toggle for benchmark timings.
+
+    Returns:
+        float: Elapsed time if successful, 0.0 otherwise.
     """
     t0 = time.time()
     try:
@@ -207,8 +232,26 @@ def run_difference_pipeline(
     reclassify_snow_ice
 ) -> tuple:
     """
-    Combined task: Computes Difference -> Plots Map -> Creates Layout.
-    Returns (diff_time, plot_time).
+    Combined task pipeline computing difference maps and plotting the layouts.
+
+    Args:
+        earlier_path (Path): Filepath to the chronologically earlier mosaic.
+        later_path (Path): Filepath to the chronologically later mosaic.
+        diff_path (Path): Destination filepath for the calculated difference map.
+        mode (str): Mode of the pipeline execution (e.g., 'flood', 'landslide').
+        maps_dir (Path): Output directory for the raw maps.
+        layouts_dir (Path): Output directory for formatted layouts.
+        short_name (str): The product short name.
+        layer (str): The specific layer being compared.
+        diff_id (str): Identifier joining the compared dates.
+        diff_date_str (str): Date string to be displayed in layout.
+        layout_title (str): Primary layout map title.
+        bbox (list[float]): Coordinate bounds for visualization.
+        zoom_bbox (list[float] | None): Optional zoomed inset map bounds.
+        reclassify_snow_ice (bool): Rule flag indicating snow/ice processing.
+
+    Returns:
+        tuple: (diff_time, plot_time) floating point times in seconds.
     """
     # Differencing
     t0_diff = time.time()
@@ -235,6 +278,27 @@ def run_difference_pipeline(
     return t_diff, t_plot
 
 
+def run_rgb_task(vv_path, vh_path, rgb_path) -> float:
+    """
+    Wrapper function to execute RTC RGB composite visualizations and catch exceptions.
+
+    Args:
+        vv_path (Path): Source path to the VV Float32 mosaic.
+        vh_path (Path): Source path to the VH Float32 mosaic.
+        rgb_path (Path): Output destination for the calculated RGB GeoTIFF.
+
+    Returns:
+        float: Elapsed processing time in seconds.
+    """
+    t0 = time.time()
+    try:
+        create_rtc_rgb_visualization(vv_path, vh_path, rgb_path)
+        logger.info(f"Successfully generated RGB composite: {rgb_path.name}")
+    except Exception as e:
+        logger.error(f"RGB Generation failed for {rgb_path.name}: {e}")
+    return time.time() - t0
+
+
 def generate_products(
     df_opera, mode, mode_dir: Path, layout_title: str, bbox: list[float], zoom_bbox: list[float] | None,
     filter_date: str | None = None, reclassify_snow_ice: bool = False, slope_threshold: int | None = None,
@@ -243,6 +307,23 @@ def generate_products(
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
     Granules are reprojected to the most common UTM zone present in the data for a given date.
+
+    Args:
+        df_opera (pd.DataFrame): Dataframe of aggregated metadata generated by next_pass.
+        mode (str): Contextual mode (e.g., "flood", "fire", "landslide").
+        mode_dir (Path): Active output directory path.
+        layout_title (str): Output string mapped into the PDF layout.
+        bbox (list[float]): Working bounds.
+        zoom_bbox (list[float] | None): Sub-region bounds for inset.
+        filter_date (str | None): Target comparison threshold date string.
+        reclassify_snow_ice (bool): Triggers specific filters for DSWx rules.
+        slope_threshold (int | None): Degree limit for masking pixels via topography.
+        benchmark_stats (dict | None): Optional collector dict for execution timings.
+        username (str | None): Earthdata auth credentials.
+        password (str | None): Earthdata auth credentials.
+
+    Returns:
+        None
     """
     import multiprocessing
 
@@ -334,10 +415,10 @@ def generate_products(
 
                         logger.info(f"Processing {short_name} - {layer} for pass {pass_id} (Date: {date})")
                         logger.info(f"Found {len(urls)} URLs for this pass")
-
+                        
                         layout_date = ""
 
-                        # Use GDAL Direct-to-Disk Mosaicking for RTC to conserve RAM
+                        # Use GDAL Direct-to-Disk Mosaicking for RTC products to conserve RAM
                         if short_name == "OPERA_L2_RTC-S1_V1":
                             logger.info("Using GDAL Direct-to-Disk mosaicking for RTC to conserve RAM.")
                             
@@ -361,7 +442,7 @@ def generate_products(
                             mosaic_path = data_dir / mosaic_name
                             tmp_path = data_dir / f"tmp_{mosaic_name}"
 
-                            # Safely open datasets to avoid GDALDatasetShadow errors
+                            # Open datasets to avoid GDALDatasetShadow errors
                             opened_datasets = []
                             for u in urls:
                                 vsi_url = f"/vsicurl/{u}" if u.startswith("http") and not u.startswith("/vsi") else u
@@ -392,7 +473,7 @@ def generate_products(
                                 outputType=gdal.GDT_Float32
                             )
                             
-                            # Execute Warp straight to disk using the opened datasets
+                            # Execute Warp straight to disk
                             gdal.Warp(str(tmp_path), opened_datasets, options=warp_options)
 
                             # Explicitly close datasets to free C++ memory!
@@ -421,7 +502,6 @@ def generate_products(
                             }
 
                             # Submit Plotting Task
-                            logger.info(f"Submitting background plotting task for {pass_id}...")
                             future = executor.submit(
                                 run_plotting_task,
                                 maps_dir, layouts_dir, mosaic_path, short_name, layer,
@@ -432,7 +512,7 @@ def generate_products(
 
                             continue # Skip the xarray processing loops entirely for RTC
 
-                        # For non-RTC products, we load the data into xarray for filtering and reclassification before mosaicking
+                        # For non-RTC products, we load the granules into xarray DataArrays for filtering and mosaicking
                         DS, conf_DS, date_DS = None, None, None
 
                         if mode == "fire":
@@ -504,7 +584,6 @@ def generate_products(
                                     date_groups[crs_str].append(aux_data[0])
                                     conf_groups[crs_str].append(aux_data[1])
                         else:
-                            # Only DS is present (e.g., RTC-S1)
                             for i, da_data in enumerate(DS):
                                 try: crs_str = str(da_data.rio.crs)
                                 except AttributeError: continue
@@ -544,11 +623,7 @@ def generate_products(
                                 colormap = get_image_colormap(DS[0])
                             except Exception:
                                 colormap = None
-                        
-                        output_dtype = None
-                        if short_name == "OPERA_L2_RTC-S1_V1":
-                            output_dtype = "float32"
-
+                            
                         # Mosaic the datasets using the single global master grid setup
                         mosaic, _, nodata = mosaic_opera(all_warped_ds, product=short_name, merge_args={})
 
@@ -569,7 +644,7 @@ def generate_products(
                             else:
                                 logger.warning("Coastal mask shape mismatches mosaic. Skipping coastal filter.")
 
-                        image = array_to_image(mosaic, colormap=colormap, nodata=nodata, dtype=output_dtype)
+                        image = array_to_image(mosaic, colormap=colormap, nodata=nodata)
                         
                         # Create filename and full paths using pass_id (YYYYMMDDtHHMM)
                         mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
@@ -579,8 +654,6 @@ def generate_products(
                         # Save the mosaic to a temporary GeoTIFF
                         copy(image, tmp_path, driver="GTiff")
                         warp_args = {"xRes": 30, "yRes": 30, "creationOptions": ["COMPRESS=DEFLATE"]}
-                        if short_name.startswith("OPERA_L2_RTC"): 
-                            warp_args["outputType"] = gdal.GDT_Float32
                         
                         # Reproject/compress using GDAL directly into the final GeoTIFF
                         gdal.Warp(str(mosaic_path), str(tmp_path), **warp_args)
@@ -609,10 +682,35 @@ def generate_products(
                         )
                         plotting_futures.append(future)
 
+        # RTC RGB Visualization Generation
+        if mode == "landslide" and "OPERA_L2_RTC-S1_V1" in mosaic_index:
+            logger.info("Submitting concurrent RTC RGB visualization tasks...")
+            rtc_dict = mosaic_index["OPERA_L2_RTC-S1_V1"]
+            
+            # Check if both VV and VH layers were successfully generated
+            if "RTC-VV" in rtc_dict and "RTC-VH" in rtc_dict:
+                # Find passes where we have both VV and VH
+                vv_passes = set(rtc_dict["RTC-VV"].keys())
+                vh_passes = set(rtc_dict["RTC-VH"].keys())
+                common_passes = vv_passes.intersection(vh_passes)
+                
+                for pass_id in common_passes:
+                    vv_path = rtc_dict["RTC-VV"][pass_id]["path"]
+                    vh_path = rtc_dict["RTC-VH"][pass_id]["path"]
+                    
+                    rgb_name = f"OPERA_L2_RTC-S1_V1_RGB_{pass_id}.tif"
+                    rgb_path = data_dir / rgb_name
+                    
+                    # Correctly submit the wrapper task instead of the core generation function
+                    future = executor.submit(
+                        run_rgb_task, 
+                        vv_path, vh_path, rgb_path
+                    )
+                    plotting_futures.append(future)
+
         # Concurrent differencing
         if mode in ["flood", "landslide"]:
             logger.info(f"Submitting concurrent pair-wise differencing tasks ({mode})...")
-            
             for short_name_k, layers_dict in mosaic_index.items():
                 # Filter for relevant products only (RTC for Landslide, all for Flood)
                 if mode == "landslide" and short_name_k != "OPERA_L2_RTC-S1_V1": continue
@@ -655,26 +753,17 @@ def generate_products(
         executor.shutdown(wait=True)
         if benchmark_stats is not None:
             # Process Plotting Futures (Standard Mosaics)
-            total_plotting_time = 0.0
-            for f in plotting_futures:
-                try:
-                    # run_plotting_task returns elapsed time
-                    total_plotting_time += f.result()
-                except Exception:
-                    pass
+            total_plotting_time = sum(f.result() for f in plotting_futures if f.exception() is None)
+            total_diff_time = 0.0
             
             # Process Differencing Pipeline Futures (Returns (diff_time, plot_time))
-            total_diff_time = 0.0
             for f in differencing_futures:
-                try: 
+                if f.exception() is None:
                     d_t, p_t = f.result()
                     total_diff_time += d_t
                     total_plotting_time += p_t
-                except Exception:
-                    pass
             
             # Update Stats
             if 'plotting' in benchmark_stats: benchmark_stats['plotting']['seq'] = total_plotting_time
             if 'differencing' in benchmark_stats: benchmark_stats['differencing']['seq'] = total_diff_time
-        
         logger.info("All tasks complete.")

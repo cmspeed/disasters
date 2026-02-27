@@ -365,3 +365,65 @@ def compute_and_write_difference_positive_change_only(
 
     logger.info(f"Positive change difference written to {out_path}")
     return
+
+
+def create_rtc_rgb_visualization(vv_path: Path | str, vh_path: Path | str, out_path: Path | str) -> None:
+    """
+    Creates an 8-bit 3-band RGB composite from Float32 VV and VH mosaics using windowed processing.
+    Red: sqrt(VV) scaled [0.14, 0.52]
+    Green: sqrt(VH) scaled [0.05, 0.259]
+    Blue: sqrt(VV) scaled [0.14, 0.52]
+
+    Args:
+        vv_path (Path | str): Path to the VV band raster.
+        vh_path (Path | str): Path to the VH band raster.
+        out_path (Path | str): Output path for the RGB composite GeoTIFF.
+    """
+    import numpy as np
+    import rasterio
+    from rasterio.windows import Window
+    
+    # Helper function to stretch values to 8-bit safely
+    def stretch_to_8bit(arr, vmin, vmax):
+        # Ignore warnings from calculating sqrt of negative numbers/nans
+        with np.errstate(invalid='ignore'):
+            arr_sqrt = np.sqrt(arr)
+        
+        arr_clipped = np.clip(arr_sqrt, vmin, vmax)
+        stretched = (arr_clipped - vmin) / (vmax - vmin) * 255
+        
+        # Set nan pixels to 0 (black/nodata)
+        np.nan_to_num(stretched, copy=False, nan=0.0)
+        return stretched.astype(np.uint8)
+
+    with rasterio.open(vv_path) as src_vv, rasterio.open(vh_path) as src_vh:
+        profile = src_vv.profile.copy()
+        
+        # Update profile for an 8-bit, 3-band RGB image
+        profile.update(
+            dtype=rasterio.uint8,
+            count=3,
+            nodata=0,
+            compress='deflate',
+            photometric='RGB'
+        )
+
+        with rasterio.open(out_path, 'w', **profile) as dst:
+            # Process block by block to prevent memory crashes
+            for block_index, window in src_vv.block_windows(1):
+                vv_data = src_vv.read(1, window=window)
+                vh_data = src_vh.read(1, window=window)
+
+                # Compute stretches
+                # Red and Blue use VV [0.14, 0.52]
+                red_blue = stretch_to_8bit(vv_data, 0.14, 0.52)
+                # Green uses VH [0.05, 0.259]
+                green = stretch_to_8bit(vh_data, 0.05, 0.259)
+
+                # Write bands (1=Red, 2=Green, 3=Blue)
+                dst.write(red_blue, 1, window=window)
+                dst.write(green, 2, window=window)
+                dst.write(red_blue, 3, window=window)
+                
+    # Convert standard GeoTIFF to Cloud Optimized GeoTIFF (COG)
+    save_gtiff_as_cog(out_path, out_path)
