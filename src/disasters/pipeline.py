@@ -36,6 +36,8 @@ from .mosaic import array_to_image, compile_and_load_data, get_master_crs, get_m
 
 logger = logging.getLogger(__name__)
 
+gdal.DontUseExceptions()
+
 @dataclass
 class PipelineConfig:
     """
@@ -420,7 +422,7 @@ def generate_products(
 
                         # Use GDAL Direct-to-Disk Mosaicking for RTC products to conserve RAM
                         if short_name == "OPERA_L2_RTC-S1_V1":
-                            logger.info("Using GDAL Direct-to-Disk mosaicking for RTC to conserve RAM.")
+                            logger.info("Using GDAL direct-to-disk mosaicking for RTC to conserve RAM.")
                             
                             # Provide GDAL with Earthdata Authentication
                             cookies_path = str(Path("cookies.txt").resolve())
