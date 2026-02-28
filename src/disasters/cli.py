@@ -22,14 +22,13 @@ VALID_SHORT_NAMES = [
 ]
 
 VALID_LAYER_NAMES = ["WTR", "BWTR", "VEG-ANOM-MAX", "VEG-DIST-STATUS"]
-VALID_MODES = ["flood", "fire", "landslide", "earthquake"]
+VALID_MODES = ["flood", "fire", "landslide", "earthquake", "rtc-rgb"]
 VALID_FUNCTIONS = ["opera_search", "both"]
 
 
 @click.group()
 def cli() -> None:
     """Disaster products pipeline CLI."""
-    # Configure logging specifically for the CLI command
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 
@@ -115,7 +114,7 @@ def cli() -> None:
     type=click.Choice(VALID_MODES),
     default="flood",
     show_default=True,
-    help="Mode of operation: flood, fire, landslide, earthquake.",
+    help="Mode of operation: flood, fire, landslide, earthquake, rtc-rgb.",
 )
 @click.option(
     "-f",
