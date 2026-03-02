@@ -94,10 +94,9 @@ def cli() -> None:
     type=str,
     required=False,
     help=(
-        "End date (YYYY-MM-DD) for the OPERA product search. The script will "
-        "find the N most recent products available on or before this date "
-        "(where N is set by --number-of-dates). Defaults to 'today' if not "
-        "provided."
+        "Date string. Can be a single end date (YYYY-MM-DD) to find the N most recent products, "
+        "OR a date range (YYYY-MM-DD/YYYY-MM-DD). If a range is provided, the script calculates "
+        "the required number of passes automatically."
     ),
 )
 @click.option(
@@ -106,7 +105,7 @@ def cli() -> None:
     type=int,
     default=5,
     show_default=True,
-    help="Number of most recent dates to consider for OPERA products.",
+    help="Number of most recent dates to consider for OPERA products. (Overridden if a date range is provided in -d).",
 )
 @click.option(
     "-m",

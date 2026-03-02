@@ -11,6 +11,7 @@ from typing import Sequence
 
 import next_pass
 import numpy as np
+import pandas as pd
 import pyproj
 import rasterio
 from osgeo import gdal
@@ -72,6 +73,8 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
         Path | None: The mode directory path (e.g., `<output_dir>/flood`) if the pipeline ran, 
                      or None if exited early (e.g., earthquake mode).
     """
+    from datetime import datetime, timezone
+
     if config.mode == "earthquake":
         logger.info("Earthquake mode coming soon. Exiting...")
         return None
@@ -100,10 +103,11 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
     else:
         # Cloud Logic
         logger.info("Running in CLOUD SEARCH mode.")
+        
         output_dir = next_pass.run_next_pass(
             bbox=config.bbox,
             number_of_dates=config.number_of_dates,
-            date=config.date,
+            date=config.date, # This can now safely be "2026-02-02/2026-02-27"
             functionality=config.functionality
         )
         
