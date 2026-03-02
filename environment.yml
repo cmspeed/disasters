@@ -19,12 +19,11 @@ dependencies:
   - pip
   - pygmt
   - rasterio
-  - rioxarray
+  - rioxarray<0.20.0
   - tabulate
   - xarray
   - zarr
   - openpyxl 
   
   - pip:
-      - numpy<2.0
       - git+https://github.com/OPERA-Cal-Val/next_pass.git@main
