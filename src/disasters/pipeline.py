@@ -423,15 +423,10 @@ def generate_products(
                         
                         layout_date = ""
 
-                        # Use GDAL Direct-to-Disk Mosaicking for RTC products to conserve RAM
+                        # Use GDAL direct-to-disk mosaicking for RTC products to conserve RAM
                         if short_name == "OPERA_L2_RTC-S1_V1":
                             logger.info("Using GDAL direct-to-disk mosaicking for RTC to conserve RAM.")
                             
-                            # Provide GDAL with Earthdata Authentication
-                            cookies_path = str(Path("cookies.txt").resolve())
-                            gdal.SetConfigOption("GDAL_HTTP_COOKIEFILE", cookies_path)
-                            gdal.SetConfigOption("GDAL_HTTP_COOKIEJAR", cookies_path)
-                            gdal.SetConfigOption("GDAL_HTTP_NETRC", "YES")
                             gdal.PushErrorHandler('CPLQuietErrorHandler')
 
                             # Extract bounds from master_grid for exact pixel alignment
