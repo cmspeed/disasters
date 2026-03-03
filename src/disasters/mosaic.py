@@ -280,7 +280,7 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
             return results
         else:
             # Standard fast path (concurrent only)
-            logger.info(f"Loading {len(links)} granules concurrently...")
+            logger.info(f"Loading {len(links)} '{label}' granules concurrently...")
             return _run_concurrent(links)
     
     # Load the primary data layer (DS)
