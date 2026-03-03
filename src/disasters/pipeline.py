@@ -343,6 +343,9 @@ def generate_products(
     elif mode == "landslide":
         short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
         layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS", "RTC-VV", "RTC-VH"]
+    elif mode == "rtc-rgb":
+        short_names = ["OPERA_L2_RTC-S1_V1"]
+        layer_names = ["RTC-VV", "RTC-VH"]
     elif mode == "earthquake":
         logger.info("Earthquake mode coming soon. Exiting...")
         return

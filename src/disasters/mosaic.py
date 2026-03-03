@@ -45,6 +45,8 @@ def get_master_crs(df_opera: pd.DataFrame, mode: str) -> Optional[str]:
         cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS"]
     elif mode == "landslide":
         cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS", "Download URL RTC-VV", "Download URL RTC-VH"]
+    elif mode == "rtc-rgb":
+        cols = ["Download URL RTC-VV", "Download URL RTC-VH"]
     else:
         return None
 
