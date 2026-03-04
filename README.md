@@ -29,7 +29,7 @@ We recommend using **Mamba** for faster environment setup.
 ### Prerequisite installs
 1. Download source code:
 ```bash
-git clone [https://github.com/OPERA-Cal-Val/disasters](https://github.com/OPERA-Cal-Val/disasters)
+git clone https://github.com/OPERA-Cal-Val/disasters.git
 ```
 
 2. Navigate to the repository, install dependencies using the included environment.yml file, and install the package:
