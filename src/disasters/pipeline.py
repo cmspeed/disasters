@@ -452,10 +452,9 @@ def generate_products(
                             # Open datasets to avoid GDALDatasetShadow errors
                             opened_datasets = []
                             for u in urls:
-                                vsi_url = f"/vsicurl/{u}" if u.startswith("http") and not u.startswith("/vsi") else u
-                                ds = gdal.Open(vsi_url)
+                                ds = gdal.Open(u)
                                 if ds is None:
-                                    logger.warning(f"GDAL failed to open URL (likely auth or missing file), skipping: {vsi_url}")
+                                    logger.warning(f"GDAL failed to open URL (likely auth or missing file), skipping: {u}")
                                     continue
                                 opened_datasets.append(ds)
 
