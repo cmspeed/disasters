@@ -15,6 +15,7 @@ import rioxarray
 from osgeo import gdal
 from pygmt.params import Box
 from pyproj import Geod
+import rasterio
 
 from .io import cleanup_temp_file
 
@@ -255,14 +256,14 @@ def make_map(
                         cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
                     )
 
-                    # Simple Legend
+                    # Simple Legend (Placed Inside Top Left to prevent layout squish)
                     legend_path = maps_dir / f"binary_legend_{unique_id}.txt"
                     with open(legend_path, "w") as f:
                         f.write("H 10p,Helvetica-Bold Water Change\n")
                         f.write("D 0.2c 1p\n") 
-                        f.write("S 0.3c s 0.3c 0/0/200 0.25p 0.5c Water Gain\n")
+                        f.write("S 0.3c s 0.4c 0/0/200 0.25p 0.8c Water Gain\n")
                     
-                    fig.legend(spec=str(legend_path), position="JBC+jTC+o0c/1.0c+w4c", box="+gwhite+p1p")
+                    fig.legend(spec=str(legend_path), position="jTL+o0.2c/0.2c+w4.5c", box="+gwhite+p1p")
                     
                     # Cleanup
                     try:
@@ -307,18 +308,18 @@ def make_map(
                         cmap=str(cpt_path), frame=["WSne", "xaf", "yaf"], nan_transparent=True
                     )
 
-                    # Full Legend
+                    # Full Legend (Placed Inside Top Left to prevent layout squish)
                     legend_path = maps_dir / f"categorical_legend_{unique_id}.txt"
                     with open(legend_path, "w") as f:
                         f.write("H 10p,Helvetica-Bold Water Change Classes\n")
                         f.write("D 0.2c 1p\n")
-                        f.write("S 0.3c s 0.3c 0/0/200 0.25p 0.5c Water Gain (Inundation)\n")
-                        f.write("S 0.3c s 0.3c 30/144/255 0.25p 0.5c Water Gain (Partial)\n")
-                        f.write("S 0.3c s 0.3c 200/0/0 0.25p 0.5c Water Loss (Drying)\n")
-                        f.write("S 0.3c s 0.3c 255/127/80 0.25p 0.5c Water Loss (Partial)\n")
-                        f.write("S 0.3c s 0.3c 0/0/0 0.25p 0.5c Stable Water\n")
+                        f.write("S 0.3c s 0.4c 0/0/200 0.25p 0.8c Water Gain (Inundation)\n")
+                        f.write("S 0.3c s 0.4c 30/144/255 0.25p 0.8c Water Gain (Partial)\n")
+                        f.write("S 0.3c s 0.4c 200/0/0 0.25p 0.8c Water Loss (Drying)\n")
+                        f.write("S 0.3c s 0.4c 255/127/80 0.25p 0.8c Water Loss (Partial)\n")
+                        f.write("S 0.3c s 0.4c 0/0/0 0.25p 0.8c Stable Water\n")
                         
-                    fig.legend(spec=str(legend_path), position="JBC+jTC+o0c/1.0c+w5c", box="+gwhite+p1p")
+                    fig.legend(spec=str(legend_path), position="jTL+o0.2c/0.2c+w6.5c", box="+gwhite+p1p")
                     
                     try: 
                         os.remove(cpt_path)
@@ -374,6 +375,81 @@ def make_map(
                 nan_transparent=True,
             )
             fig.colorbar(cmap=color_palette, equalsize=1.5)
+
+        elif layer == "CONF":
+            cmap_dict = None
+            with rasterio.open(mosaic_path) as src:
+                try:
+                    cmap_dict = src.colormap(1)
+                except ValueError:
+                    pass
+
+            color_palette = str(maps_dir / f"conf_cpt_{unique_id}.cpt")
+            with open(color_palette, "w") as f:
+                if cmap_dict:
+                    for val in range(256):
+                        if val in cmap_dict:
+                            r, g, b, a = cmap_dict[val]
+                            # In PyGMT, 100 means fully transparent, 0 means opaque.
+                            transparency = int(100 * (1 - (a / 255.0)))
+                            # Force nodata 255 or 0-alpha values to be completely transparent
+                            if val == 255 or a == 0:
+                                f.write(f"{val} {r}/{g}/{b}@100 {val+1} {r}/{g}/{b}@100\n")
+                            else:
+                                f.write(f"{val} {r}/{g}/{b}@{transparency} {val+1} {r}/{g}/{b}@{transparency}\n")
+                        else:
+                            f.write(f"{val} 0/0/0@100 {val+1} 0/0/0@100\n")
+                else:
+                    # Fallback
+                    f.write("0 255/255/255@0 1 255/255/255@0\n")
+                    f.write("255 0/0/0@100 256 0/0/0@100\n")
+                f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
+
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=color_palette,
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+            )
+
+            legend_path = maps_dir / f"conf_legend_{unique_id}.txt"
+            with open(legend_path, "w") as f:
+                f.write("H 10p,Helvetica-Bold Confidence Classes\n")
+                f.write("D 0.2c 1p\n")
+                
+                if "HLS" in short_name:
+                    f.write("S 0.3c s 0.4c 255/255/255 0.25p 0.8c 0: Not Water\n")
+                    f.write("S 0.3c s 0.4c 0/0/255 0.25p 0.8c 1: High Confidence\n")
+                    f.write("S 0.3c s 0.4c 95/127/255 0.25p 0.8c 2: Moderate Confidence\n")
+                    f.write("S 0.3c s 0.4c 0/195/0 0.25p 0.8c 3: Partial (Conservative)\n")
+                    f.write("S 0.3c s 0.4c 150/255/150 0.25p 0.8c 4: Partial (Aggressive)\n")
+                    f.write("S 0.3c s 0.4c 213/213/213 0.25p 0.8c 10: Not Water (Cloud)\n")
+                    f.write("S 0.3c s 0.4c 91/91/213 0.25p 0.8c 11: High Conf (Cloud)\n")
+                    f.write("S 0.3c s 0.4c 136/151/213 0.25p 0.8c 12: Mod Conf (Cloud)\n")
+                    f.write("S 0.3c s 0.4c 91/184/91 0.25p 0.8c 13: Partial Cons (Cloud)\n")
+                    f.write("S 0.3c s 0.4c 163/213/163 0.25p 0.8c 14: Partial Agg (Cloud)\n")
+                    f.write("S 0.3c s 0.4c 0/255/255 0.25p 0.8c 20-24: Snow/Ice\n")
+                    f.write("S 0.3c s 0.4c 0/0/127 0.25p 0.8c 254: Ocean Mask\n")
+                else: # S1
+                    f.write("S 0.3c s 0.4c 255/255/255 0.25p 0.8c 0: Not Water\n")
+                    f.write("S 0.3c s 0.4c 0/0/255 0.25p 0.8c 1: High Confidence\n")
+                    f.write("S 0.3c s 0.4c 95/127/255 0.25p 0.8c 2: Moderate Confidence\n")
+                    f.write("S 0.3c s 0.4c 0/195/0 0.25p 0.8c 5: Inundated Vegetation\n")
+                    f.write("S 0.3c s 0.4c 0/0/0 0.25p 0.8c 6, 7: Low Backscatter\n")
+                    f.write("S 0.3c s 0.4c 255/255/255 0.25p 0.8c 30: Not Water (Wetland)\n")
+                    f.write("S 0.3c s 0.4c 0/0/255 0.25p 0.8c 31: High Conf (Wetland)\n")
+                    f.write("S 0.3c s 0.4c 95/127/255 0.25p 0.8c 32: Mod Conf (Wetland)\n")
+                    f.write("S 0.3c s 0.4c 0/195/0 0.25p 0.8c 35: Inundated Veg (Wetland)\n")
+                    f.write("S 0.3c s 0.4c 0/0/0 0.25p 0.8c 36, 37: Low Backscr (Wetland)\n")
+                    f.write("S 0.3c s 0.4c 128/128/128 0.25p 0.8c 250, 251: Topo/Layover\n")
+
+            fig.legend(spec=str(legend_path), position="jTL+o0.2c/0.2c+w6.5c", box="+gwhite+p1p")
+
+            try:
+                os.remove(legend_path)
+            except: pass
 
         elif layer == "VEG-ANOM-MAX":
             color_palette = str(palette_dir / "VEG-ANOM-MAX.cpt")
@@ -572,6 +648,14 @@ def make_map(
                         cmap=color_palette,
                         nan_transparent=True,
                     )
+                elif layer == "CONF":
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=color_palette,
+                        nan_transparent=True,
+                    )
                 elif layer == "VEG-ANOM-MAX":
                     fig.grdimage(
                         grid=grd,
@@ -715,7 +799,7 @@ def make_layout(
     wrap_width = 50
 
     # Map text elements
-    if short_name == "OPERA_L3_DSWX-S1_V1":
+    if short_name == "OPERA_L3_DSWX-S1_V1" and layer != "CONF":
         subtitle = "OPERA Dynamic Surface Water eXtent from Sentinel-1 (DSWx-S1)"
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-S1 mosaicked "
@@ -724,7 +808,7 @@ def make_layout(
         )
         data_source = "Copernicus Sentinel-1"
 
-    elif short_name == "OPERA_L3_DSWX-HLS_V1":
+    elif short_name == "OPERA_L3_DSWX-HLS_V1" and layer != "CONF":
         subtitle = "OPERA Dynamic Surface Water eXtent from HLS (DSWx-HLS)"
         if reclassify_snow_ice == True:
             map_information = textwrap.dedent(
@@ -744,6 +828,15 @@ def make_layout(
                 f"This map depicts regions of full surface water and inundated surface water. "
             )
         data_source = "Copernicus Harmonized Landsat and Sentinel-2"
+
+    elif layer == "CONF":
+        product_label = "DSWx-HLS" if "HLS" in short_name else "DSWx-S1"
+        subtitle = f"OPERA Dynamic Surface Water eXtent Confidence ({product_label})"
+        map_information = (
+            f"This map depicts the confidence layer associated with the ARIA/OPERA water extent map. "
+            f"It represents the quality, probability, or classification confidence of the surface water."
+        )
+        data_source = "Copernicus Harmonized Landsat and Sentinel-2" if "HLS" in short_name else "Copernicus Sentinel-1"
 
     elif short_name == "OPERA_L3_DIST-ALERT-S1_V1":
         subtitle = "OPERA Surface Disturbance Alert from Sentinel-1 (DIST-ALERT-S1)"
