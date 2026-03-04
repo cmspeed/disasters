@@ -11,6 +11,7 @@ from typing import Sequence
 
 import next_pass
 import numpy as np
+import pandas as pd
 import pyproj
 import rasterio
 from osgeo import gdal
@@ -72,6 +73,8 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
         Path | None: The mode directory path (e.g., `<output_dir>/flood`) if the pipeline ran, 
                      or None if exited early (e.g., earthquake mode).
     """
+    from datetime import datetime, timezone
+
     if config.mode == "earthquake":
         logger.info("Earthquake mode coming soon. Exiting...")
         return None
@@ -100,10 +103,11 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
     else:
         # Cloud Logic
         logger.info("Running in CLOUD SEARCH mode.")
+        
         output_dir = next_pass.run_next_pass(
             bbox=config.bbox,
             number_of_dates=config.number_of_dates,
-            date=config.date,
+            date=config.date, # This can now safely be "2026-02-02/2026-02-27"
             functionality=config.functionality
         )
         
@@ -329,16 +333,36 @@ def generate_products(
     """
     import multiprocessing
 
-    # Create data directory
+    # Define short names and layer names based on mode FIRST
+    if mode == "flood":
+        short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+        layer_names = ["WTR", "BWTR"]
+    elif mode == "fire":
+        short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
+        layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
+    elif mode == "landslide":
+        short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
+        layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS", "RTC-VV", "RTC-VH"]
+    elif mode == "rtc-rgb":
+        short_names = ["OPERA_L2_RTC-S1_V1"]
+        layer_names = ["RTC-VV", "RTC-VH"]
+    elif mode == "earthquake":
+        logger.info("Earthquake mode coming soon. Exiting...")
+        return
+    
+    # Filter to see if we have ANY data for the products required by this mode, if not, exit
+    df_mode_data = df_opera[df_opera["Dataset"].isin(short_names)]
+    if df_mode_data.empty:
+        logger.warning(f"No {mode.upper()} products ({', '.join(short_names)}) found for this date range. Exiting gracefully.")
+        return
+
+    # Create directories
     data_dir = ensure_directory(mode_dir / "data")
-    # Create maps directory
     maps_dir = ensure_directory(mode_dir / "maps")
-    # Create layouts directory
     layouts_dir = ensure_directory(mode_dir / "layouts")
 
     # Determine most common UTM CRS to warp all granules to across all dates
-    crs_mode = "landslide" if mode == "rtc-rgb" else mode
-    target_crs_proj4 = get_master_crs(df_opera, crs_mode)
+    target_crs_proj4 = get_master_crs(df_mode_data, mode)
     
     # Detect if the CRS is geographic to set the correct resolution
     crs_obj = pyproj.CRS.from_proj4(target_crs_proj4)
@@ -360,23 +384,6 @@ def generate_products(
     
     # Define the resampling method.
     resampling_method = Resampling.bilinear if mode in ["landslide", "rtc-rgb"] else Resampling.nearest
-    
-    # Define short names and layer names based on mode
-    if mode == "flood":
-        short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
-        layer_names = ["WTR", "BWTR"]
-    elif mode == "fire":
-        short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
-        layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS"]
-    elif mode == "landslide":
-        short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
-        layer_names = ["VEG-ANOM-MAX", "VEG-DIST-STATUS", "RTC-VV", "RTC-VH"]
-    elif mode == "rtc-rgb":
-        short_names = ["OPERA_L2_RTC-S1_V1"]
-        layer_names = ["RTC-VV", "RTC-VH"]
-    elif mode == "earthquake":
-        logger.info("Earthquake mode coming soon. Exiting...")
-        return
 
     # Extract and find unique dates, sort them
     df_opera["Start Date"] = df_opera["Start Time"].dt.date.astype(str)
@@ -445,10 +452,9 @@ def generate_products(
                             # Open datasets to avoid GDALDatasetShadow errors
                             opened_datasets = []
                             for u in urls:
-                                vsi_url = f"/vsicurl/{u}" if u.startswith("http") and not u.startswith("/vsi") else u
-                                ds = gdal.Open(vsi_url)
+                                ds = gdal.Open(u)
                                 if ds is None:
-                                    logger.warning(f"GDAL failed to open URL (likely auth or missing file), skipping: {vsi_url}")
+                                    logger.warning(f"GDAL failed to open URL (likely auth or missing file), skipping: {u}")
                                     continue
                                 opened_datasets.append(ds)
 

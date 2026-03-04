@@ -11,9 +11,10 @@ This tool streamlines the generation of data to support disaster response effort
 - Flooding (e.g., DSWx-HLS, DSWx-S1)
 - Wildfires (e.g., DIST-ALERT-HLS)
 - Landslides (e.g., DIST-ALERT-HLS, RTC)
+- SAR Backscatter Visualizations (e.g., RTC RGB Composites)
 - Earthquakes (e.g., CSLC, DISP) *(coming soon)*
 
-The output includes ready-to-share maps and analysis-ready GeoTIFFs for any user-defined region and event type. Currently `flood`, `wildfire`, and `landslide` are supported (*earthquakes coming soon*).
+The output includes ready-to-share maps and analysis-ready GeoTIFFs for any user-defined region and event type. Currently `flood`, `wildfire`, `landslide`, and `rtc-rgb` are supported (*earthquakes coming soon*).
 
 ## Development setup
 
@@ -39,27 +40,36 @@ mamba env create --file environment.yml
 mamba activate disasters
 pip install -e .
 ```
-The provided environment.yml file sets up a fully functional environment, and the pip install command makes the opera-disaster CLI tool available system-wide.
+The provided `environment.yml` file sets up a fully functional environment, and the pip install command makes the opera-disaster CLI tool available system-wide.
 
 ### Usage
 
+You can define your temporal search window in two ways: by providing a single target date (`-d YYYY-MM-DD`) to retrieve the `N` most recent satellite passes defined by the `-n` argument, or by providing a strict date range (`-d YYYY-MM-DD/YYYY-MM-DD`) to automatically query all products within that exact window (which ignores the `-n` argument).
+
 #### Example: Generate flood maps over Lake Mead, Nevada using the two most recent OPERA products
 ```bash
-opera-disaster run -b 35 37 -115 -113 -o LakeMead -m flood -n 2 -lt "Lake Mead Floods"
+opera-disaster run -b 35 37 -115 -113 -m flood -n 2 -o LakeMead -lt "Lake Mead Floods"
 ```
+
+#### Example: Query a strict date range (Flood Mode)
+Generate products within a specific multi-week window.
+```bash
+opera-disaster run -b 35.5 36.5 -107 -106 -m flood -d 2026-02-01/2026-02-15 -o VallesCaldera -lt "Valles Caldera Flooding"
+```
+
 #### Example: Generate fire impact maps over New Mexico using the five (default) most recent OPERA products
 ```bash
-opera-disaster run -b 32 34 -106.5 -104 -o NM_Fires -m fire -lt "New Mexico Fires, June 2025"
+opera-disaster run -b 32 34 -106.5 -104 -m fire -o NM_Fires -lt "New Mexico Fires, June 2025"
 ```
 
 #### Example: Generate fire impact maps over a wildfire in Quebec using the most recent 30 OPERA products (prior to 07-31-2023), filtered to remove disturbance prior to 05-15-2023
 ```bash
-opera-disaster run -b 48 49.5 -77.5 -74.4 -o QuebecFires -m fire -d 2023-07-31 -n 30 -lt "Quebec Wildfire, Summer 2023" -fd 2023-05-15
+opera-disaster run -b 48 49.5 -77.5 -74.4 -m fire -d 2023-07-31 -n 30  -fd 2023-05-15 -o QuebecFires -lt "Quebec Wildfire, Summer 2023"
 ```
 
 #### Example: Generate landslide impact maps over a landslide in Brazil in February 2023, retaining only pixels with slopes greater than 15 degrees (slope filtering is optional)
 ```bash
-opera-disaster run -b -24 -23.5 -45.75 -45.5 -o brazil_landslides -m landslide -lt "Brazil Landslides, Feb. 2023" -fd 2023-02-01 -d 2023-03-01 -zb -23.783 -23.733 -45.733 -45.683 -st 15
+opera-disaster run -b -24 -23.5 -45.75 -45.5 -m landslide -d 2023-02-01/2023-03-01 -fd 2023-02-01 -zb -23.783 -23.733 -45.733 -45.683 -st 15 -o brazil_landslides -lt "Brazil Landslides, Feb. 2023"
 
 ```
 
@@ -67,13 +77,20 @@ opera-disaster run -b -24 -23.5 -45.75 -45.5 -o brazil_landslides -m landslide -
 In this example, misclassified snow/ice classified pixels (likely sediment-rich water) are reclassified to open water using the DIST-HLS Confidence layer.
 Note: All snow/ice/sediment-rich water pixels are not reclassified using this approach.
 ```bash
-opera-disaster run -b 17.3 18.8 -78.6 -75.6 -m flood -o hurricane_melissa_Oct2025 -rc -lt "Hurricane Melissa, Oct. 2025"
+opera-disaster run -b 17.3 18.8 -78.6 -75.6 -m flood -d 2025-10-17/2025-11-04 -o hurricane_melissa_Oct2025 -rc -lt "Hurricane Melissa, Oct. 2025"
 ```
 
 #### Example: Generate disturbance maps over Jamaica for Hurricane Melissa in October 2025
 In this example, a filter data (`-fd`) of October 28, 2025 (coinciding with hurricane landfall) is applied. All disturbance prior to this date is filtered out of the final mosaics.
 ```bash
-opera-disaster run -b 17.3 18.8 -78.6 -75.6 -m fire -o hurricane_melissa_Oct2025 -lt "Hurricane Melissa, Oct. 2025" -fd 2025-10-28
+opera-disaster run -b 17.3 18.8 -78.6 -75.6 -m fire -d 2025-10-17/2025-11-04 -fd 2025-10-28 -o hurricane_melissa_Oct2025 -lt "Hurricane Melissa, Oct. 2025"
+```
+
+#### Example: Generate an RTC RGB composite visualization
+
+Create an 8-bit RGB composite from Sentinel-1 RTC backscatter data to visualize surface features using the 5 most recent passes.
+```bash
+opera-disaster run -b 35.5 36.5 -107 -106 -m rtc-rgb -d 2026-02-01/2026-02-15 -o VallesCaldera_RTC -lt "Valles Caldera SAR Backscatter"
 ```
 
 ### Running with Local Data
@@ -82,7 +99,7 @@ You can process pre-downloaded OPERA GeoTIFFs stored on your local machine by us
 
 #### Basic Local Usage
 ```bash
-opera-disaster run -b 35 37 -115 -113 -ld /path/to/my/data -o LocalOutput -m flood -lt "Local Test"
+opera-disaster run -b 35 37 -115 -113 -m flood -ld /path/to/my/data -o LocalOutput -lt "Local Test"
 ```
 
 **Note:** The bounding box (`-b`) is still required to define the map extent and master grid alignment.
@@ -109,9 +126,9 @@ If auxiliary files are missing, the script will log a warning and proceed with s
 |----------------------|----------|-----------------------------------------------------------------------------------------------|
 | `-b`, `--bbox`        | Yes      | Bounding box: `South North West East` (space-separated floats) |
 | `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results |
-| `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, `landslide`, or `earthquake`|
+| `-m`, `--mode`        | Yes      | Disaster mode: `flood`, `fire`, `landslide`, `rtc-rgb`, or `earthquake`|
 | `-ld`, `--local_dir`  | No       | Path to a local directory containing pre-downloaded OPERA GeoTIFFs. If provided, cloud search is skipped. |
-| `-d`, `--date`        | No       | Specifies the end date (YYYY-MM-DD) for the OPERA product search. The script will find the 'N' most recent products available on or before this date. Defaults to 'today'. (Ignored if `-ld` is used) |
+| `-d`, `--date`        | No       | Date string. Can be a single end date (`YYYY-MM-DD`) OR a strict date range (`YYYY-MM-DD/YYYY-MM-DD`). If a range is provided, the script automatically queries the exact window. Defaults to `today`. (Ignored if `-ld` is used) |
 | `-n`, `--number_of_dates` | No   | Number of most recent dates to process (default: `5`). (Ignored if `-ld` is used) |
 | `-lt`, `--layout_title` | Yes     | Title of PDF layout generated for each product |
 | `-fd`, `--filter_date` | No     | Date to use as filter in `fire` mode to remove all disturbance preceding `filter_date` |
@@ -127,7 +144,8 @@ The `-m / --mode` argument determines which NASA OPERA products and data layers 
 |--------------|------------------------------------|----------------------------------------|-----------------------------------------------------------------------------|
 | `flood`      | `DSWx-HLS`, `DSWx-S1` | `WTR`, `BWTR` | Detects surface water using optical (HLS) and SAR (S1) observations         |
 | `fire`       | `OPERA_L3_DIST-ALERT-HLS_V1`, `DIST-ALERT-S1` *(coming soon)* | `VEG-ANOM-MAX`, `VEG-DIST-STATUS` | Identifies vegetation disturbance and anomalies from wildfire events        |
-| `landslide`       | `OPERA_L3_DIST-ALERT-HLS_V1`, `OPERA_L2_RTC-S1_V1` | `VEG-ANOM-MAX`, `VEG-DIST-STATUS`, `RTC-VV`, `RTC-VH` |Identifies vegetation disturbance and anomalies from landslides events        |
+| `landslide`       | `OPERA_L3_DIST-ALERT-HLS_V1`, `OPERA_L2_RTC-S1_V1` | `VEG-ANOM-MAX`, `VEG-DIST-STATUS`, `RTC-VV`, `RTC-VH` | Identifies vegetation disturbance and anomalies from landslides events        |
+| `rtc-rgb`       | `OPERA_L2_RTC-S1_V1` | `RTC-VV`, `RTC-VH` | Generates 8-bit RGB composite visualizations from Sentinel-1 RTC backscatter data
 | `earthquake` | `CSLC`, `DISP`, `RTC-S1` *(coming soon)* | *(coming soon)* | Maps surface displacement and SAR backscatter changes related to seismic activity | 
 
 ### Output

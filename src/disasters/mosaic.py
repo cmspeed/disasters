@@ -23,85 +23,49 @@ logger = logging.getLogger(__name__)
 
 def get_master_crs(df_opera: pd.DataFrame, mode: str) -> Optional[str]:
     """
-    Scans all relevant product URLs in the DataFrame to find the most common UTM CRS.
-    This defines the single global master grid for the entire time series.
-
-    Args:
-        df_opera (pd.DataFrame): DataFrame containing metadata and URLs.
-        mode (str): Mode of operation.
-
-    Returns:
-        str or None: PROJ4 string representing the most common CRS.
+    Calculates the most common UTM CRS from the metadata WKT geometries.
     """
-    logger.info("Scanning all granules to determine Global Master CRS...")
+    logger.info("Determining Global Master CRS from geometric metadata...")
+    from shapely import wkt
     
-    # Collect all unique URLs relevant to the mode
-    all_urls = []
+    # Grab all valid WKT geometries from the pre-filtered dataframe
+    valid_geoms = df_opera['Geometry (WKT)'].dropna()
+    valid_geoms = valid_geoms[valid_geoms != 'N/A']
     
-    # Define columns to check based on mode
-    if mode == "flood":
-        cols = ["Download URL WTR", "Download URL BWTR"]
-    elif mode == "fire":
-        cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS"]
-    elif mode == "landslide":
-        cols = ["Download URL VEG-ANOM-MAX", "Download URL VEG-DIST-STATUS", "Download URL RTC-VV", "Download URL RTC-VH"]
-    else:
-        return None
-
-    for col in cols:
-        if col in df_opera.columns:
-            all_urls.extend(df_opera[col].dropna().tolist())
-
-    # Remove duplicates
-    all_urls = list(set(all_urls))
+    if valid_geoms.empty:
+        raise RuntimeError("Could not determine CRS: No valid geometries found in metadata.")
+        
+    epsg_counter = Counter()
     
-    # Filter for S1A vs S1C if both exist (keep most common platform)
-    satellite_counts = Counter()
-    for link in all_urls:
-        if 'S1A' in link: satellite_counts['S1A'] += 1
-        elif 'S1C' in link: satellite_counts['S1C'] += 1
-    
-    if satellite_counts:
-        most_common_sat, _ = satellite_counts.most_common(1)[0]
-        all_urls = [u for u in all_urls if most_common_sat in u]
-
-    crs_counter = Counter()
-
-    # Open files to check CRS (metadata read only). Sample only first 50.
-    sample_size = min(len(all_urls), 50) 
-    
-    logger.info(f"Checking CRS of {sample_size} representative granules...")
-    
-    # For this check, we authenticate locally just for this function if needed
-    try:
-        username, password = authenticate()
-    except Exception:
-        username, password = None, None
-
-    for i, url in enumerate(all_urls[:sample_size]):
+    for geom_str in valid_geoms:
         try:
-            # Try direct open (local/s3)
-            with rioxarray.open_rasterio(url, masked=False) as ds:
-                crs_counter[str(ds.rio.crs)] += 1
+            geom = wkt.loads(geom_str)
+            center_lon = geom.centroid.x
+            center_lat = geom.centroid.y
+            
+            # Geometrically calculate the UTM zone number
+            zone_number = int((center_lon + 180) / 6) + 1
+            is_northern = center_lat >= 0
+            
+            # Map to standard EPSG codes for UTM
+            epsg = 32600 + zone_number if is_northern else 32700 + zone_number
+            epsg_counter[epsg] += 1
         except Exception:
-            try:
-                # Try via earthaccess/opera_utils
-                f = open_file(url, earthdata_username=username, earthdata_password=password)
-                with rioxarray.open_rasterio(f, masked=False) as ds:
-                    crs_counter[str(ds.rio.crs)] += 1
-            except Exception:
-                continue
-                
-    if not crs_counter:
-        raise RuntimeError("Could not determine CRS from any granules.")
-
-    # Get the most common CRS
-    most_common_crs_str, count = crs_counter.most_common(1)[0]
+            continue
+            
+    if not epsg_counter:
+        raise RuntimeError("Could not calculate UTM zones from geometries.")
+        
+    most_common_epsg, count = epsg_counter.most_common(1)[0]
     
-    # Convert to PROJ4 string for consistency
-    proj4_str = pyproj.CRS.from_string(most_common_crs_str).to_proj4()
-
-    logger.info(f"Global Master CRS determined: {proj4_str} (found in {count}/{sample_size} granules)")
+    # Create CRS object to get human-readable details
+    crs_obj = pyproj.CRS.from_epsg(most_common_epsg)
+    utm_name = crs_obj.name
+    proj4_str = crs_obj.to_proj4()
+    
+    logger.info(f"Global Master CRS determined: {utm_name} (EPSG:{most_common_epsg})")
+    logger.info(f"Found in {count}/{len(valid_geoms)} granules.")
+    
     return proj4_str
 
 
@@ -278,7 +242,7 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
             return results
         else:
             # Standard fast path (concurrent only)
-            logger.info(f"Loading {len(links)} granules concurrently...")
+            logger.info(f"Loading {len(links)} '{label}' granules concurrently...")
             return _run_concurrent(links)
     
     # Load the primary data layer (DS)
