@@ -227,10 +227,6 @@ def make_map(
                     cmap=cpt_name, frame=["WSne", "xaf", "yaf"], nan_transparent=True
                 )
                 fig.colorbar(cmap=cpt_name, frame=["x+lNormalized backscatter difference (dB)"])
-                
-                # Cleanup CPT handled by PyGMT session usually, but explicit remove if file persists is good practice
-                if os.path.exists(cpt_name):
-                    os.remove(cpt_name)
 
             # 'flood' mode (DSWx)
             else:
@@ -264,12 +260,6 @@ def make_map(
                         f.write("S 0.3c s 0.4c 0/0/200 0.25p 0.8c Water Gain\n")
                     
                     fig.legend(spec=str(legend_path), position="jTL+o0.2c/0.2c+w4.5c", box="+gwhite+p1p")
-                    
-                    # Cleanup
-                    try:
-                        os.remove(cpt_path)
-                        os.remove(legend_path)
-                    except: pass
 
                 # --- Sub-Case B2: Full Categorical (Max value > 1) ---
                 else:
@@ -320,12 +310,6 @@ def make_map(
                         f.write("S 0.3c s 0.4c 0/0/0 0.25p 0.8c Stable Water\n")
                         
                     fig.legend(spec=str(legend_path), position="jTL+o0.2c/0.2c+w6.5c", box="+gwhite+p1p")
-                    
-                    try: 
-                        os.remove(cpt_path)
-                        os.remove(legend_path)
-                    except:
-                        pass
 
         # Add grid image (based on product/layer)
         elif not is_difference and layer in ["WTR", "BWTR", "CONF", "VEG-DIST-STATUS"]:
@@ -460,11 +444,6 @@ def make_map(
                     f.write(f"S 0.3c s 0.4c {get_rgb(8)} 0.25p 0.8c 8: Confirmed >=50%, finished\n")
                 fig.legend(spec=str(legend_path), position="jTL+o0.2c/0.2c+w6.5c", box="+gwhite+p1p")
 
-            try:
-                os.remove(legend_path)
-                os.remove(color_palette)
-            except: pass
-
         elif layer == "VEG-ANOM-MAX":
             color_palette = str(palette_dir / "VEG-ANOM-MAX.cpt")
             fig.grdimage(
@@ -513,9 +492,6 @@ def make_map(
             fig.colorbar(
                 cmap=cpt_name, frame=["x+lNormalized backscatter (@~g@~@-0@-)"]
             )
-            
-            if os.path.exists(cpt_name):
-                os.remove(cpt_name)
 
         # Add scalebar and compass rose
         xmin, xmax, ymin, ymax = region_padded
@@ -627,7 +603,7 @@ def make_map(
                         nan_transparent=True,
                         interpolation="n"
                     )
-                elif layer == "VEG-ANOM-MAX":
+                elif not is_difference and layer == "VEG-ANOM-MAX":
                     fig.grdimage(
                         grid=grd,
                         region=zoom_region,
@@ -635,7 +611,7 @@ def make_map(
                         cmap=color_palette,
                         nan_transparent=True,
                     )
-                elif short_name.startswith("OPERA_L2_RTC"):
+                elif not is_difference and short_name.startswith("OPERA_L2_RTC"):
                     fig.grdimage(
                         grid=grd,
                         region=zoom_region,
@@ -645,14 +621,20 @@ def make_map(
                     )
                 elif is_difference and "gain" in str(mosaic_path):
                     fig.grdimage(
-                        grid=grd, region=zoom_region, projection="M5c",
-                        cmap=str(cpt_path), nan_transparent=True,
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=str(cpt_path),
+                        nan_transparent=True,
                         interpolation="n"
                     )
                 elif is_difference:
                     fig.grdimage(
-                        grid=grd, region=zoom_region, projection="M5c",
-                        cmap=cpt_name, nan_transparent=True
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=cpt_name,
+                        nan_transparent=True
                     )
 
                 # Add scale bar to the inset map. Use Bottom-Left (jBL) inside the inset frame.
@@ -683,7 +665,24 @@ def make_map(
         # Export map
         map_name = maps_dir / f"{short_name}_{layer}_{date_str}{utm_suffix}_map.png"
         fig.savefig(map_name, dpi=900)
-        cleanup_temp_file(mosaic_wgs84) 
+        cleanup_temp_file(mosaic_wgs84)
+
+        # Remove all temp CPTs and Legends after all maps are drawn
+        for tmp_file in [
+            maps_dir / f"binary_gain_{unique_id}.cpt",
+            maps_dir / f"binary_legend_{unique_id}.txt",
+            maps_dir / f"categorical_diff_{unique_id}.cpt",
+            maps_dir / f"categorical_legend_{unique_id}.txt",
+            maps_dir / f"dynamic_cpt_{unique_id}.cpt",
+            maps_dir / f"custom_legend_{unique_id}.txt",
+            f"difference_cpt_{unique_id}",
+            f"rtc_grayscale_{unique_id}"
+        ]:
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except:
+                pass
 
         return map_name
 
