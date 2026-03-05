@@ -36,20 +36,23 @@ def cli() -> None:
 @click.option(
     "-b",
     "--bbox",
-    type=float,
-    nargs=4,
+    type=str,
     required=True,
-    metavar="S N W E",
-    help="Bounding box in the form: South North West East.",
+    help=(
+        "Bounding box or area of interest. MUST be enclosed in double quotes if it contains spaces. "
+        "Accepted formats: "
+        "1) 4 floats: \"S N W E\" | "
+        "2) WKT string: \"POLYGON((...))\" | "
+        "3) Local path: \"/path/to/file.kml\" | "
+        "4) Web URL: \"https://example.com/AOI.geojson\""
+    ),
 )
 @click.option(
     "-zb",
     "--zoom-bbox",
-    type=float,
-    nargs=4,
-    metavar="S N W E",
+    type=str,
     default=None,
-    help="Optional bounding box for the zoom-in inset map.",
+    help="Optional bounding box for the zoom-in inset map. MUST be 4 floats enclosed in double quotes (e.g., \"S N W E\").",
 )
 @click.option(
     "-o",
@@ -163,9 +166,10 @@ def cli() -> None:
     default=False,
     help="If set, runs data loading in both sequential and concurrent modes to compare performance.",
 )
+
 def run(
-    bbox: Sequence[float],
-    zoom_bbox: Optional[Sequence[float]],
+    bbox: str,
+    zoom_bbox: Optional[str],
     output_dir: Path,
     local_dir: Optional[Path],
     short_name: Optional[str],
@@ -185,10 +189,34 @@ def run(
     if slope_threshold is not None and not (0 <= slope_threshold <= 100):
         raise click.BadParameter("Slope threshold must be between 0 and 100.", param_hint="--slope-threshold")
 
+    # Process bbox tokens into a list of floats OR a single WKT/path string
+    bbox_parts = bbox.replace(",", " ").split()
+    
+    if len(bbox_parts) == 4:
+        try:
+            bbox_arg = [float(x) for x in bbox_parts]
+        except ValueError:
+            bbox_arg = bbox
+    else:
+        # Keep as WKT string or file path
+        bbox_arg = bbox
+
+    # Process zoom_bbox if provided
+    zoom_bbox_arg = None
+    if zoom_bbox is not None:
+        zoom_parts = zoom_bbox.replace(",", " ").split()
+        if len(zoom_parts) == 4:
+            try:
+                zoom_bbox_arg = [float(x) for x in zoom_parts]
+            except ValueError:
+                raise click.BadParameter("Zoom bounding box must contain exactly 4 valid numbers.", param_hint="--zoom-bbox")
+        else:
+            raise click.BadParameter("Zoom bounding box must contain exactly 4 valid numbers.", param_hint="--zoom-bbox")
+
     # Build the PipelineConfig object
     cfg = PipelineConfig(
-        bbox=list(bbox),
-        zoom_bbox=list(zoom_bbox) if zoom_bbox is not None else None,
+        bbox=bbox_arg,
+        zoom_bbox=zoom_bbox_arg,
         output_dir=output_dir,
         local_dir=local_dir,
         short_name=short_name,

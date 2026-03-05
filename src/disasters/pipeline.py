@@ -44,10 +44,9 @@ class PipelineConfig:
     """
     Configuration for running the OPERA disaster pipeline.
     """
-    bbox: Sequence[float]
+    bbox: Sequence[float] | str
     output_dir: Path
     layout_title: str
-
     zoom_bbox: Sequence[float] | None = None
     local_dir: Path | None = None
     short_name: str | None = None
@@ -103,11 +102,13 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
     else:
         # Cloud Logic
         logger.info("Running in CLOUD SEARCH mode.")
+
+        next_pass_bbox = [config.bbox] if isinstance(config.bbox, str) else config.bbox
         
         output_dir = next_pass.run_next_pass(
-            bbox=config.bbox,
+            bbox=next_pass_bbox,
             number_of_dates=config.number_of_dates,
-            date=config.date, # This can now safely be "2026-02-02/2026-02-27"
+            date=config.date,
             functionality=config.functionality
         )
         
@@ -132,6 +133,38 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
 
     logger.info(f"Outputting results to: {mode_dir}")
 
+    # Convert WKT/File to an SNWE list for internal mosaicking logic
+    if isinstance(config.bbox, str):
+        if config.local_dir:
+            # If in local mode, we don't assume next_pass utilities are available.
+            # We must use a simple fallback to parse the WKT into a bounding box.
+            try:
+                from shapely import wkt
+                geom = wkt.loads(config.bbox)
+                minx, miny, maxx, maxy = geom.bounds
+                internal_bbox = [miny, maxy, minx, maxx]
+                logger.info(f"Extracted SNWE bounds from WKT for local mode: {internal_bbox}")
+            except Exception as e:
+                logger.error("In local mode, the -b argument must be 'S N W E' or a valid WKT POLYGON.")
+                logger.error(f"Failed to parse WKT: {e}")
+                return None
+        else:
+            # If in Cloud Search mode, leverage next_pass's robust parsers
+            try:
+                from utils.utils import bbox_type, bbox_to_geometry
+                bbox_parsed = bbox_type([config.bbox])
+                geom, bounds, centroid = bbox_to_geometry(bbox_parsed, mode_dir)
+                
+                # bounds is (minx, miny, maxx, maxy) -> mapping to [S, N, W, E]
+                minx, miny, maxx, maxy = bounds
+                internal_bbox = [miny, maxy, minx, maxx]
+                logger.info(f"Extracted SNWE bounding envelope from geometry: {internal_bbox}")
+            except Exception as e:
+                logger.error(f"Failed to parse geometry from string/file: {e}")
+                return None
+    else:
+        internal_bbox = list(config.bbox)
+
     # Set up benchmarking stats if requested
     benchmark_stats = None
     if config.benchmark:
@@ -147,7 +180,7 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
         mode=config.mode,
         mode_dir=mode_dir,
         layout_title=config.layout_title,
-        bbox=list(config.bbox),
+        bbox=internal_bbox,
         zoom_bbox=list(config.zoom_bbox) if config.zoom_bbox is not None else None,
         filter_date=config.filter_date,
         reclassify_snow_ice=config.reclassify_snow_ice,
