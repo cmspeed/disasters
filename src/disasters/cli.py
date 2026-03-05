@@ -163,6 +163,13 @@ def cli() -> None:
     default=False,
     help="If set, runs data loading in both sequential and concurrent modes to compare performance.",
 )
+@click.option(
+    "--no-mask",
+    is_flag=True,
+    default=False,
+    help="If set, skips the coastal masking step.",
+)
+
 def run(
     bbox: Sequence[float],
     zoom_bbox: Optional[Sequence[float]],
@@ -179,6 +186,7 @@ def run(
     reclassify_snow_ice: bool,
     slope_threshold: Optional[int],
     benchmark: bool,
+    no_mask: bool
 ) -> None:
     """Run the disaster pipeline (end-to-end)."""
     # Ensure slope values are between 0 and 100 degrees, if provided
@@ -201,7 +209,8 @@ def run(
         filter_date=filter_date,
         reclassify_snow_ice=reclassify_snow_ice,
         slope_threshold=slope_threshold,
-        benchmark=benchmark
+        benchmark=benchmark,
+        no_mask=no_mask
     )
 
     mode_dir = run_pipeline(cfg)

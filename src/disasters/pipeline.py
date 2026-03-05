@@ -61,6 +61,7 @@ class PipelineConfig:
     reclassify_snow_ice: bool = False
     slope_threshold: int | None = None
     benchmark: bool = False
+    no_mask: bool = False
 
 
 def run_pipeline(config: PipelineConfig) -> Path | None:
@@ -155,7 +156,8 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
         slope_threshold=config.slope_threshold,
         benchmark_stats=benchmark_stats,
         username=username,
-        password=password
+        password=password,
+        no_mask=config.no_mask
     )
 
     if config.benchmark and benchmark_stats:
@@ -309,7 +311,7 @@ def run_rgb_task(vv_path, vh_path, rgb_path) -> float:
 def generate_products(
     df_opera, mode, mode_dir: Path, layout_title: str, bbox: list[float], zoom_bbox: list[float] | None,
     filter_date: str | None = None, reclassify_snow_ice: bool = False, slope_threshold: int | None = None,
-    benchmark_stats: dict | None = None, username: str | None = None, password: str | None = None
+    benchmark_stats: dict | None = None, username: str | None = None, password: str | None = None, no_mask: bool = False
 ) -> None:
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
@@ -328,6 +330,7 @@ def generate_products(
         benchmark_stats (dict | None): Optional collector dict for execution timings.
         username (str | None): Earthdata auth credentials.
         password (str | None): Earthdata auth credentials.
+        no_mask (bool): If True, skips coastal masking step.
 
     Returns:
         None
@@ -380,8 +383,13 @@ def generate_products(
     if mode in ["landslide", "rtc-rgb"] and slope_threshold is not None:
         global_slope_mask = process_dem_and_slope(df_opera, master_grid, slope_threshold, data_dir)
 
-    # Generate Global Coastal Mask
-    global_coastal_mask = generate_coastal_mask(bbox, master_grid)
+    # Generate Global Coastal Mask only if not explicitly disabled
+    global_coastal_mask = None
+    if not no_mask:
+        logger.info("Generating global coastal mask...")
+        global_coastal_mask = generate_coastal_mask(bbox, master_grid)
+    else:
+        logger.info("Coastal masking disabled by user.")
     
     # Define the resampling method.
     resampling_method = Resampling.bilinear if mode in ["landslide", "rtc-rgb"] else Resampling.nearest
