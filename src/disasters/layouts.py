@@ -662,9 +662,10 @@ def make_map(
                 pen="1p,magenta",
             )
 
-        # Export map
+        # Export map and cleanup
         map_name = maps_dir / f"{short_name}_{layer}_{date_str}{utm_suffix}_map.png"
         fig.savefig(map_name, dpi=900)
+        grd.close()
         cleanup_temp_file(mosaic_wgs84)
 
         # Remove all temp CPTs and Legends after all maps are drawn

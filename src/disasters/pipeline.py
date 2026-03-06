@@ -747,6 +747,14 @@ def generate_products(
                                 )
                                 plotting_futures.append(future)
 
+                        # Explicitly close xarray file
+                        if DS is not None:
+                            for da in DS: da.close()
+                        if conf_DS is not None:
+                            for da in conf_DS: da.close()
+                        if date_DS is not None:
+                            for da in date_DS: da.close()
+
         # RTC RGB Visualization Generation
         if mode in ["landslide", "rtc-rgb"] and "OPERA_L2_RTC-S1_V1" in mosaic_index:
             logger.info("Submitting concurrent RTC RGB visualization tasks...")
