@@ -288,6 +288,7 @@ def run(
     required=False,
     help="Optional: Filter downloads to only include products and layers relevant to a specific mode.",
 )
+
 def download(
     bbox: str,
     output_dir: Path,
@@ -322,6 +323,82 @@ def download(
         logger.info(f"Download complete. Files saved to: {out_dir}")
     else:
         logger.warning("Download pipeline exited without producing outputs.")
+
+
+@cli.command(name="mosaic")
+@click.option(
+    "-i",
+    "--input-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True, exists=True),
+    required=True,
+    help="Path to a local directory containing pre-downloaded OPERA geotiffs.",
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    required=True,
+    help="Directory where the stitched GeoTIFF mosaics will be saved.",
+)
+@click.option(
+    "-b",
+    "--bbox",
+    type=str,
+    required=False,
+    default=None,
+    help=(
+        "Optional bounding box to crop the output. If omitted, the pipeline computes the geographic union of all inputs. "
+        "MUST be enclosed in double quotes if it contains spaces. "
+        "Accepted formats: \"S N W E\" | \"POLYGON((...))\" | \"/path/to/file.kml\""
+    ),
+)
+@click.option(
+    "--benchmark", 
+    is_flag=True, 
+    default=False,
+    help="If set, tracks performance metrics during the mosaicking process.",
+)
+
+def mosaic(
+    input_dir: Path,
+    output_dir: Path,
+    bbox: Optional[str],
+    benchmark: bool
+) -> None:
+    """Stitch local OPERA granules into analysis-ready mosaics (No analysis/layouts)."""
+    
+    # Process optional bbox using the same parsing as the run command
+    bbox_arg = None
+    if bbox is not None:
+        bbox_parts = bbox.replace(",", " ").split()
+        if len(bbox_parts) == 4:
+            try:
+                coords = [float(x) for x in bbox_parts]
+                # Auto-swap S/N if flipped
+                if coords[0] > coords[1]: coords[0], coords[1] = coords[1], coords[0]
+                # Auto-swap W/E if flipped
+                if coords[2] > coords[3]: coords[2], coords[3] = coords[3], coords[2]
+                bbox_arg = coords
+            except ValueError:
+                bbox_arg = bbox
+        else:
+            bbox_arg = bbox
+
+    # Import the dedicated mosaic pipeline (we will build this next)
+    from .pipeline import run_mosaic_only
+    
+    logger.info("Starting mosaic pipeline...")
+    output_path = run_mosaic_only(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        bbox=bbox_arg,
+        benchmark=benchmark
+    )
+    
+    if output_path:
+        logger.info(f"Mosaicking complete. Outputs saved to: {output_path}")
+    else:
+        logger.warning("Mosaic pipeline exited without producing outputs.")
 
 if __name__ == "__main__":
     cli()

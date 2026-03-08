@@ -1,29 +1,35 @@
 from __future__ import annotations
 
+# Standard Library Imports
 import concurrent.futures
 import logging
 import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+# Third-Party Imports
 import next_pass
 import numpy as np
 import pandas as pd
 import pyproj
 import rasterio
+import xarray as xr
 from osgeo import gdal
 from rasterio.enums import Resampling
 from rasterio.shutil import copy
-import xarray as xr
+from rasterio.warp import transform_bounds
 
+# Local/Relative Imports
 from .auth import authenticate
 from .catalog import cluster_by_time, read_opera_metadata
-from .diff import (compute_and_write_difference,
-                   compute_and_write_difference_positive_change_only,
-                   save_gtiff_as_cog, create_rtc_rgb_visualization
+from .diff import (
+    compute_and_write_difference,
+    compute_and_write_difference_positive_change_only,
+    create_rtc_rgb_visualization,
+    save_gtiff_as_cog,
 )
 from .filters import (
     compute_date_threshold,
@@ -34,8 +40,14 @@ from .filters import (
 )
 from .io import cleanup_temp_file, ensure_directory, scan_local_directory
 from .layouts import make_layout, make_map
-from .mosaic import array_to_image, compile_and_load_data, get_master_crs, get_master_grid_props, get_image_colormap, mosaic_opera
-
+from .mosaic import (
+    array_to_image,
+    compile_and_load_data,
+    get_image_colormap,
+    get_master_crs,
+    get_master_grid_props,
+    mosaic_opera,
+)
 logger = logging.getLogger(__name__)
 
 gdal.DontUseExceptions()
@@ -61,6 +73,54 @@ class PipelineConfig:
     slope_threshold: int | None = None
     benchmark: bool = False
     no_mask: bool = False
+
+
+def get_local_spatial_properties(df_opera: pd.DataFrame) -> tuple[list[float], str]:
+    """
+    Calculates the global bounding box [S, N, W, E] and most common CRS 
+    from a local DataFrame of OPERA products by reading their headers.
+    """
+    logger.info("Calculating spatial properties from local files...")
+    url_cols = [c for c in df_opera.columns if c.startswith("Download URL")]
+    all_files = []
+    for c in url_cols:
+        all_files.extend(df_opera[c].dropna().tolist())
+    all_files = list(set(all_files)) # Unique files only
+
+    minx, miny, maxx, maxy = float('inf'), float('inf'), float('-inf'), float('-inf')
+    crs_counter = Counter()
+
+    for f in all_files:
+        try:
+            with rasterio.open(f) as src:
+                bounds = src.bounds
+                crs = src.crs
+                
+                if crs is not None:
+                    crs_counter[crs.to_string()] += 1
+                    
+                # Transform to EPSG:4326 to match S, N, W, E expected format
+                if crs and crs.to_string() != "EPSG:4326":
+                    left, bottom, right, top = transform_bounds(crs, "EPSG:4326", *bounds)
+                else:
+                    left, bottom, right, top = bounds
+                
+                minx = min(minx, left)
+                miny = min(miny, bottom)
+                maxx = max(maxx, right)
+                maxy = max(maxy, top)
+        except Exception as e:
+            logger.warning(f"Could not read spatial properties from {f}: {e}")
+
+    if minx == float('inf'):
+        raise RuntimeError("Could not calculate bounding box from local files.")
+
+    most_common_crs = crs_counter.most_common(1)[0][0]
+    
+    logger.info(f"Local Master CRS determined: {most_common_crs}")
+    
+    # Return [S, N, W, E] and the CRS
+    return [miny, maxy, minx, maxx], most_common_crs
 
 
 def run_pipeline(config: PipelineConfig) -> Path | None:
@@ -342,6 +402,207 @@ def run_download_only(bbox: Sequence[float] | str, output_dir: Path, date: str |
     return data_dir
 
 
+def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | str | None, benchmark: bool) -> Path | None:
+    """
+    Run a standalone mosaicking pipeline on local data.
+    """
+    logger.info(f"Running standalone MOSAIC pipeline using data from: {input_dir}")
+    
+    if not input_dir.exists():
+        logger.error(f"Input directory {input_dir} does not exist.")
+        return None
+        
+    df_opera = scan_local_directory(input_dir)
+    if df_opera.empty:
+        return None
+        
+    ensure_directory(output_dir)
+    
+    # Calculate spatial properties directly from files
+    auto_bbox, target_crs_proj4 = get_local_spatial_properties(df_opera)
+    
+    # Handle user bbox override
+    if bbox is not None:
+        if isinstance(bbox, str):
+            try:
+                from shapely import wkt
+                geom = wkt.loads(bbox)
+                b_minx, b_miny, b_maxx, b_maxy = geom.bounds
+                internal_bbox = [b_miny, b_maxy, b_minx, b_maxx]
+                logger.info(f"Using user-provided WKT bounds: {internal_bbox}")
+            except Exception as e:
+                logger.error(f"Failed to parse user WKT: {e}")
+                return None
+        else:
+            internal_bbox = list(bbox)
+            logger.info(f"Using user-provided S N W E bounds: {internal_bbox}")
+    else:
+        internal_bbox = auto_bbox
+        logger.info(f"Auto-calculated bounding box from input files: {internal_bbox}")
+        
+    # Calculate Master Grid
+    crs_obj = pyproj.CRS.from_string(target_crs_proj4)
+    target_res = 0.0002695 if crs_obj.is_geographic else 30
+    master_grid = get_master_grid_props(internal_bbox, target_crs_proj4, target_res=target_res)
+    
+    # Extract Datasets and Dates
+    df_opera["Start Date"] = df_opera["Start Time"].dt.date.astype(str)
+    unique_datasets = df_opera["Dataset"].dropna().unique()
+    
+    for short_name in unique_datasets:
+        df_sn = df_opera[df_opera["Dataset"] == short_name]
+        unique_dates = df_sn["Start Date"].dropna().unique()
+        
+        # Dynamically find all layer columns for this specific dataset
+        layer_cols = [c.replace("Download URL ", "") for c in df_sn.columns if c.startswith("Download URL ")]
+        
+        resampling_method = Resampling.bilinear if "RTC" in short_name else Resampling.nearest
+        
+        for date in unique_dates:
+            df_on_date = df_sn[df_sn["Start Date"] == date]
+            
+            # Cluster by time to separate distinct satellite passes
+            from .catalog import cluster_by_time
+            time_clusters = cluster_by_time(df_on_date, time_col="Start Time", threshold_minutes=120)
+            
+            for cluster_df in time_clusters:
+                pass_id = cluster_df["Start Time"].min().strftime("%Y%m%dT%H%M")
+                
+                for layer in layer_cols:
+                    # Skip auxiliary layers in the main loop (they get processed with their parent layer)
+                    if layer in ["CONF", "VEG-DIST-DATE", "VEG-DIST-CONF"]: 
+                        continue
+                        
+                    url_column = f"Download URL {layer}"
+                    if url_column not in cluster_df.columns: 
+                        continue
+                        
+                    urls = cluster_df[url_column].dropna().tolist()
+                    if not urls: 
+                        continue
+                        
+                    logger.info(f"Mosaicking {short_name} - {layer} for pass {pass_id}")
+                    
+                    # Use GDAL direct-to-disk for memory-heavy RTC products
+                    if "RTC" in short_name:
+                        gdal.PushErrorHandler('CPLQuietErrorHandler')
+                        
+                        height, width = master_grid['shape']
+                        transform = master_grid['transform']
+                        min_x = transform.c
+                        max_y = transform.f
+                        max_x = min_x + (transform.a * width)
+                        min_y = max_y + (transform.e * height)
+                        output_bounds = [min_x, min_y, max_x, max_y]
+
+                        mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
+                        mosaic_path = output_dir / mosaic_name
+                        tmp_path = output_dir / f"tmp_{mosaic_name}"
+
+                        opened_datasets = []
+                        for u in urls:
+                            ds = gdal.Open(u)
+                            if ds is not None: opened_datasets.append(ds)
+
+                        gdal.PopErrorHandler()
+                        if not opened_datasets: continue
+
+                        warp_options = gdal.WarpOptions(
+                            format='GTiff', outputBounds=output_bounds, width=width, height=height,
+                            dstSRS=master_grid['dst_crs'], resampleAlg='bilinear', dstNodata=np.nan,
+                            creationOptions=["COMPRESS=DEFLATE", "NUM_THREADS=ALL_CPUS"],
+                            warpOptions=["NUM_THREADS=ALL_CPUS"], warpMemoryLimit=4096,
+                            outputType=gdal.GDT_Float32
+                        )
+                        
+                        gdal.Warp(str(tmp_path), opened_datasets, options=warp_options)
+
+                        # Explicitly close datasets to free C++ memory
+                        for ds in opened_datasets: ds = None
+                        opened_datasets = []
+
+                        save_gtiff_as_cog(tmp_path, mosaic_path)
+                        cleanup_temp_file(tmp_path)
+                        continue
+
+                    # xarray/rioxarray for rule-based DSWx/DIST products
+                    # Look for a CONF layer to stack for synchronized pixel selection
+                    conf_column = "Download URL CONF"
+                    conf_urls = cluster_df[conf_column].dropna().tolist() if conf_column in cluster_df.columns else []
+                    
+                    # Trick `compile_and_load_data` into returning the CONF datasets
+                    if conf_urls:
+                        DS, conf_DS = compile_and_load_data(urls, mode="flood", conf_layer_links=conf_urls, benchmark_stats=None)
+                    else:
+                        DS = compile_and_load_data(urls, mode="other", benchmark_stats=None)
+                        conf_DS = None
+
+                    all_warped_ds = []
+                    
+                    for i, da in enumerate(DS):
+                        try:
+                            # Isolate the master grid properties specifically for this projection
+                            grid_props = master_grid.copy()
+                            dst_crs_val = grid_props.pop("dst_crs")
+                            
+                            da_warped = da.rio.reproject(dst_crs_val, **grid_props, resampling=resampling_method)
+                            
+                            # If a CONF layer exists, warp it and concatenate it underneath the main layer
+                            # This ensures mosaic_opera brings the exact matching CONF pixel along with the WTR pixel.
+                            if conf_DS is not None and i < len(conf_DS):
+                                conf_warped = conf_DS[i].rio.reproject(dst_crs_val, **grid_props, resampling=resampling_method)
+                                combined = xr.concat([da_warped, conf_warped], dim="band")
+                                combined = combined.assign_coords(band=[1, 2])
+                                all_warped_ds.append(combined)
+                            else:
+                                all_warped_ds.append(da_warped)
+                        except Exception as e:
+                            logger.warning(f"Failed to reproject a granule: {e}")
+
+                    if not all_warped_ds:
+                        continue
+                        
+                    # Apply the OPERA pixel-priority rules (Water beats Cloud, etc.)
+                    mosaic, colormap, nodata = mosaic_opera(all_warped_ds, product=short_name, merge_args={})
+
+                    # Split the synchronized CONF layer back out if we stacked it
+                    conf_mosaic = None
+                    if mosaic.shape[0] == 2:
+                        conf_mosaic = mosaic.isel(band=[1]).copy() # Band 2 is CONF
+                        mosaic = mosaic.isel(band=[0]).copy()      # Band 1 is Main Data
+
+                    # Save Main Layer
+                    mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
+                    mosaic_path = output_dir / mosaic_name
+                    tmp_path = output_dir / f"tmp_{mosaic_name}"
+                    
+                    image = array_to_image(mosaic, colormap=colormap, nodata=nodata)
+                    copy(image, tmp_path, driver="GTiff")
+                    gdal.Warp(str(mosaic_path), str(tmp_path), xRes=30, yRes=30, creationOptions=["COMPRESS=DEFLATE"])
+                    save_gtiff_as_cog(mosaic_path, mosaic_path)
+                    cleanup_temp_file(tmp_path)
+                    
+                    # Save Synchronized CONF Layer (if it was requested via stacking)
+                    if conf_mosaic is not None:
+                        conf_name = f"{short_name}_CONF_{pass_id}_mosaic.tif"
+                        conf_path = output_dir / conf_name
+                        conf_tmp = output_dir / f"tmp_{conf_name}"
+                        
+                        conf_image = array_to_image(conf_mosaic, colormap=None, nodata=255)
+                        copy(conf_image, conf_tmp, driver="GTiff")
+                        gdal.Warp(str(conf_path), str(conf_tmp), xRes=30, yRes=30, creationOptions=["COMPRESS=DEFLATE"])
+                        save_gtiff_as_cog(conf_path, conf_path)
+                        cleanup_temp_file(conf_tmp)
+
+                    # Close all xarray handles to prevent sys.excepthook teardown crashes
+                    if DS is not None:
+                        for da in DS: da.close()
+                    if conf_DS is not None:
+                        for da in conf_DS: da.close()
+                        
+    return output_dir
+
+
 def run_plotting_task(
     maps_dir, layouts_dir, mosaic_path, short_name, layer, 
     date_id, layout_date, layout_title, bbox, zoom_bbox, 
@@ -520,7 +781,7 @@ def generate_products(
     target_crs_proj4 = get_master_crs(df_mode_data, mode)
     
     # Detect if the CRS is geographic to set the correct resolution
-    crs_obj = pyproj.CRS.from_proj4(target_crs_proj4)
+    crs_obj = pyproj.CRS.from_string(target_crs_proj4)
     if crs_obj.is_geographic:
         target_res = 0.0002695 # ~30m in degrees
     else:

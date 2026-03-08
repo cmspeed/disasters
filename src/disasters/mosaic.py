@@ -60,12 +60,11 @@ def get_master_crs(df_opera: pd.DataFrame, mode: str) -> Optional[str]:
     
     crs_obj = pyproj.CRS.from_epsg(most_common_epsg)
     utm_name = crs_obj.name
-    proj4_str = crs_obj.to_proj4()
     
     logger.info(f"Global Master CRS determined: {utm_name} (EPSG:{most_common_epsg})")
     logger.info(f"Found in {count}/{len(valid_geoms)} granules.")
     
-    return proj4_str
+    return f"EPSG:{most_common_epsg}"
 
 
 def get_master_grid_props(bbox_latlon: list, target_crs_proj4: str, target_res: int = 30) -> dict:
