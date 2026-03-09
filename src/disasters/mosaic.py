@@ -58,7 +58,6 @@ def get_master_crs(df_opera: pd.DataFrame, mode: str) -> Optional[str]:
         
     most_common_epsg, count = epsg_counter.most_common(1)[0]
     
-    # Create CRS object to get human-readable details
     crs_obj = pyproj.CRS.from_epsg(most_common_epsg)
     utm_name = crs_obj.name
     proj4_str = crs_obj.to_proj4()
@@ -262,22 +261,6 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
         return DS
 
 
-def same_utm_zone(crs_a, crs_b) -> bool:
-    """
-    Check if two CRS strings belong to the same UTM zone.
-
-    Args:
-        crs_a (str or pyproj.CRS): First CRS.
-        crs_b (str or pyproj.CRS): Second CRS.
-
-    Returns:
-        bool: True if they are functionally equal.
-    """
-    if crs_a is None or crs_b is None:
-        return False
-    return str(crs_a) == str(crs_b)
-
-
 def mosaic_opera(DS: list, product: str = "OPERA_L3_DSWX-S1_V1", merge_args: dict = {}) -> Tuple[xr.DataArray, Optional[dict], float]:
     """
     Mosaics a list of OPERA product granules into a single image (in memory).
@@ -443,19 +426,19 @@ def opera_rules(product: str = "OPERA_L3_DSWX-S1_V1", nodata: int = 255):
         for val, pri in priority.items():
             priority_array[val] = pri
 
-        valid_mask = new_data != nodata
+        valid_mask = new_data[0] != nodata
+        
+        new_vals_safe = np.clip(new_data[0], 0, max_val - 1)
+        old_vals_safe = np.clip(old_data[0], 0, max_val - 1)
 
+        new_priorities = priority_array[new_vals_safe]
+        old_priorities = priority_array[old_vals_safe]
+
+        update_mask = (valid_mask) & (new_priorities > old_priorities)
+
+        # Apply the update
         for i in range(old_data.shape[0]):
-            new_vals = new_data[i]
-            old_vals = old_data[i]
-
-            new_priorities = priority_array[new_vals]
-            old_priorities = priority_array[old_vals]
-
-            update_mask = (valid_mask[i]) & (new_priorities > old_priorities)
-
-            # Apply the update
-            old_vals[update_mask] = new_vals[update_mask]
+            old_data[i][update_mask] = new_data[i][update_mask]
 
         return old_data
 

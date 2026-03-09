@@ -383,18 +383,23 @@ def create_rtc_rgb_visualization(vv_path: Path | str, vh_path: Path | str, out_p
     import rasterio
     from rasterio.windows import Window
     
-    # Helper function to stretch values to 8-bit safely
+    # Helper function to stretch values to 8-bit
     def stretch_to_8bit(arr, vmin, vmax):
-        # Ignore warnings from calculating sqrt of negative numbers/nans
+        # Prevent NaNs by forcing a tiny floor.
         with np.errstate(invalid='ignore'):
-            arr_sqrt = np.sqrt(arr)
+            arr_safe = np.maximum(arr, 1e-6)
+            arr_sqrt = np.sqrt(arr_safe)
         
-        arr_clipped = np.clip(arr_sqrt, vmin, vmax)
-        stretched = (arr_clipped - vmin) / (vmax - vmin) * 255
+        # Apply the linear stretch formula.
+        stretched = (arr_sqrt - vmin) / (vmax - vmin) * 255
         
-        # Set nan pixels to 0 (black/nodata)
-        np.nan_to_num(stretched, copy=False, nan=0.0)
-        return stretched.astype(np.uint8)
+        # 3. Handle valid but very low values.
+        stretched_clamped = np.clip(stretched, 1, 255)
+        
+        # 4. Handle Nodata
+        np.nan_to_num(stretched_clamped, copy=False, nan=0.0)
+        
+        return stretched_clamped.astype(np.uint8)
 
     with rasterio.open(vv_path) as src_vv, rasterio.open(vh_path) as src_vh:
         profile = src_vv.profile.copy()

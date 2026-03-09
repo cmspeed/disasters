@@ -17,6 +17,7 @@ import rasterio
 from osgeo import gdal
 from rasterio.enums import Resampling
 from rasterio.shutil import copy
+import xarray as xr
 
 from .auth import authenticate
 from .catalog import cluster_by_time, read_opera_metadata
@@ -59,6 +60,7 @@ class PipelineConfig:
     reclassify_snow_ice: bool = False
     slope_threshold: int | None = None
     benchmark: bool = False
+    no_mask: bool = False
 
 
 def run_pipeline(config: PipelineConfig) -> Path | None:
@@ -187,7 +189,8 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
         slope_threshold=config.slope_threshold,
         benchmark_stats=benchmark_stats,
         username=username,
-        password=password
+        password=password,
+        no_mask=config.no_mask
     )
 
     if config.benchmark and benchmark_stats:
@@ -341,7 +344,7 @@ def run_rgb_task(vv_path, vh_path, rgb_path) -> float:
 def generate_products(
     df_opera, mode, mode_dir: Path, layout_title: str, bbox: list[float], zoom_bbox: list[float] | None,
     filter_date: str | None = None, reclassify_snow_ice: bool = False, slope_threshold: int | None = None,
-    benchmark_stats: dict | None = None, username: str | None = None, password: str | None = None
+    benchmark_stats: dict | None = None, username: str | None = None, password: str | None = None, no_mask: bool = False
 ) -> None:
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
@@ -360,6 +363,7 @@ def generate_products(
         benchmark_stats (dict | None): Optional collector dict for execution timings.
         username (str | None): Earthdata auth credentials.
         password (str | None): Earthdata auth credentials.
+        no_mask (bool): If True, skips coastal masking step.
 
     Returns:
         None
@@ -412,8 +416,13 @@ def generate_products(
     if mode in ["landslide", "rtc-rgb"] and slope_threshold is not None:
         global_slope_mask = process_dem_and_slope(df_opera, master_grid, slope_threshold, data_dir)
 
-    # Generate Global Coastal Mask
-    global_coastal_mask = generate_coastal_mask(bbox, master_grid)
+    # Generate Global Coastal Mask only if not explicitly disabled
+    global_coastal_mask = None
+    if not no_mask:
+        logger.info("Generating global coastal mask...")
+        global_coastal_mask = generate_coastal_mask(bbox, master_grid)
+    else:
+        logger.info("Coastal masking disabled by user.")
     
     # Define the resampling method.
     resampling_method = Resampling.bilinear if mode in ["landslide", "rtc-rgb"] else Resampling.nearest
@@ -554,6 +563,7 @@ def generate_products(
 
                         # For non-RTC products, we load the granules into xarray DataArrays for filtering and mosaicking
                         DS, conf_DS, date_DS = None, None, None
+                        conf_colormap = None
 
                         if mode == "fire":
                             date_column = "Download URL VEG-DIST-DATE"
@@ -599,6 +609,11 @@ def generate_products(
                                 DS = compile_and_load_data(urls, mode, benchmark_stats=benchmark_stats, username=username, password=password)
                             else:
                                 DS, conf_DS = compile_and_load_data(urls, mode, conf_layer_links=conf_layer_links, benchmark_stats=benchmark_stats, username=username, password=password)
+                                if conf_DS and len(conf_DS) > 0:
+                                    try:
+                                        conf_colormap = get_image_colormap(conf_DS[0])
+                                    except Exception:
+                                        pass
 
                         # Group loaded DataArrays by CRS (UTM Zone)
                         crs_groups = defaultdict(list)
@@ -650,11 +665,22 @@ def generate_products(
                                         if cmap_temp is not None: colormap = cmap_temp
 
                             # Reproject to master grid
-                            for da in ds_group:
+                            for i, da in enumerate(ds_group):
                                 grid_props = master_grid.copy()
                                 dst_crs_val = grid_props.pop("dst_crs")
                                 da_warped = da.rio.reproject(dst_crs_val, **grid_props, resampling=resampling_method)
-                                all_warped_ds.append(da_warped)
+                                
+                                # If processing WTR/BWTR, stack CONF as a second band to sync pixel selection
+                                if mode == "flood" and layer == "WTR" and current_conf_DS is not None and i < len(current_conf_DS):
+                                    conf_da = current_conf_DS[i]
+                                    conf_warped = conf_da.rio.reproject(dst_crs_val, **grid_props, resampling=resampling_method)
+                                    
+                                    # Concatenate into a single 2-band dataset
+                                    combined = xr.concat([da_warped, conf_warped], dim="band")
+                                    combined = combined.assign_coords(band=[1, 2])
+                                    all_warped_ds.append(combined)
+                                else:
+                                    all_warped_ds.append(da_warped)
                         
                         if not all_warped_ds: continue
                         
@@ -667,12 +693,19 @@ def generate_products(
                         # Mosaic the datasets using the single global master grid setup
                         mosaic, _, nodata = mosaic_opera(all_warped_ds, product=short_name, merge_args={})
 
+                        # Check if we have a synchronized CONF layer to split out
+                        conf_mosaic = None
+                        if mosaic.shape[0] == 2:
+                            conf_mosaic = mosaic.isel(band=[1]).copy() # Band 2 is CONF
+                            mosaic = mosaic.isel(band=[0]).copy()      # Band 1 is WTR
+
                         # Apply slope mask if it has been generated previously
                         if global_slope_mask is not None:
                             # Ensure shape compatibility
                             if mosaic.shape[-2:] == global_slope_mask.shape:
                                 # Set pixels with slope < threshold to nodata
                                 mosaic.values[..., global_slope_mask] = nodata
+                                if conf_mosaic is not None: conf_mosaic.values[..., global_slope_mask] = 255
                             else:
                                 logger.warning(f"Mask shape {global_slope_mask.shape} mismatches mosaic {mosaic.shape}. Skipping slope filter.")
 
@@ -681,6 +714,7 @@ def generate_products(
                             if mosaic.shape[-2:] == global_coastal_mask.shape:
                                 # Mask out ocean (where global_coastal_mask is False)
                                 mosaic.values[..., ~global_coastal_mask.values] = nodata
+                                if conf_mosaic is not None: conf_mosaic.values[..., ~global_coastal_mask.values] = 255
                             else:
                                 logger.warning("Coastal mask shape mismatches mosaic. Skipping coastal filter.")
 
@@ -714,13 +748,45 @@ def generate_products(
 
                         # --- Background Plotting ---
                         logger.info(f"Submitting background plotting task for {pass_id}...")
-                        future = executor.submit(
-                            run_plotting_task,
-                            maps_dir, layouts_dir, mosaic_path, short_name, layer,
-                            pass_id, layout_date, layout_title, bbox, zoom_bbox,
-                            reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
-                        )
-                        plotting_futures.append(future)
+                        if mode != "rtc-rgb":
+                            future = executor.submit(
+                                run_plotting_task,
+                                maps_dir, layouts_dir, mosaic_path, short_name, layer,
+                                pass_id, layout_date, layout_title, bbox, zoom_bbox,
+                                reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
+                            )
+                            plotting_futures.append(future)
+
+                        # Save and plot the perfectly synced CONF layer if we generated it
+                        if conf_mosaic is not None:
+                            conf_image = array_to_image(conf_mosaic, colormap=conf_colormap, nodata=255)
+                            conf_name = f"{short_name}_CONF_{pass_id}_mosaic.tif"
+                            conf_path = data_dir / conf_name
+                            conf_tmp = data_dir / f"tmp_{conf_name}"
+                            
+                            copy(conf_image, conf_tmp, driver="GTiff")
+                            gdal.Warp(str(conf_path), str(conf_tmp), **warp_args)
+                            save_gtiff_as_cog(conf_path, conf_path)
+                            cleanup_temp_file(conf_tmp)
+                            logger.info(f"Saved spatially synchronized CONF layer: {conf_name}")
+
+                            # Submit Plotting Task for CONF
+                            if mode != "rtc-rgb":
+                                future = executor.submit(
+                                    run_plotting_task,
+                                    maps_dir, layouts_dir, conf_path, short_name, "CONF",
+                                    pass_id, layout_date, layout_title, bbox, zoom_bbox,
+                                    False, False, benchmark_mode=(benchmark_stats is not None)
+                                )
+                                plotting_futures.append(future)
+
+                        # Explicitly close xarray file
+                        if DS is not None:
+                            for da in DS: da.close()
+                        if conf_DS is not None:
+                            for da in conf_DS: da.close()
+                        if date_DS is not None:
+                            for da in date_DS: da.close()
 
         # RTC RGB Visualization Generation
         if mode in ["landslide", "rtc-rgb"] and "OPERA_L2_RTC-S1_V1" in mosaic_index:
