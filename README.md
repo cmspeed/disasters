@@ -69,28 +69,28 @@ When `-ld/--local_dir` is used, the pipeline skips cloud search and scans local 
 
 #### Example: Generate flood maps over Lake Mead, Nevada using the two most recent OPERA products
 ```bash
-opera-disaster run -b 35 37 -115 -113 -m flood -n 2 -o LakeMead -lt "Lake Mead Floods"
+opera-disaster run -b "35 37 -115 -113" -m flood -n 2 -o LakeMead -lt "Lake Mead Floods"
 ```
 
 #### Example: Query a strict date range (Flood Mode)
 Generate products within a specific multi-week window.
 ```bash
-opera-disaster run -b 35.5 36.5 -107 -106 -m flood -d 2026-02-01/2026-02-15 -o VallesCaldera -lt "Valles Caldera Flooding"
+opera-disaster run -b "35.5 36.5 -107 -106" -m flood -d 2026-02-01/2026-02-15 -o VallesCaldera -lt "Valles Caldera Flooding"
 ```
 
 #### Example: Generate fire impact maps over New Mexico using the five (default) most recent OPERA products
 ```bash
-opera-disaster run -b 32 34 -106.5 -104 -m fire -o NM_Fires -lt "New Mexico Fires, June 2025"
+opera-disaster run -b "32 34 -106.5 -104" -m fire -o NM_Fires -lt "New Mexico Fires, June 2025"
 ```
 
 #### Example: Generate fire impact maps over a wildfire in Quebec using the most recent 30 OPERA products (prior to 07-31-2023), filtered to remove disturbance prior to 05-15-2023
 ```bash
-opera-disaster run -b 48 49.5 -77.5 -74.4 -m fire -d 2023-07-31 -n 30  -fd 2023-05-15 -o QuebecFires -lt "Quebec Wildfire, Summer 2023"
+opera-disaster run -b "48 49.5 -77.5 -74.4" -m fire -d 2023-07-31 -n 30  -fd 2023-05-15 -o QuebecFires -lt "Quebec Wildfire, Summer 2023"
 ```
 
 #### Example: Generate landslide impact maps over a landslide in Brazil in February 2023, retaining only pixels with slopes greater than 15 degrees (slope filtering is optional)
 ```bash
-opera-disaster run -b -24 -23.5 -45.75 -45.5 -m landslide -d 2023-02-01/2023-03-01 -fd 2023-02-01 -zb -23.783 -23.733 -45.733 -45.683 -st 15 -o brazil_landslides -lt "Brazil Landslides, Feb. 2023"
+opera-disaster run -b "-24 -23.5 -45.75 -45.5" -m landslide -d 2023-02-01/2023-03-01 -fd 2023-02-01 -zb "-23.783 -23.733 -45.733 -45.683" -st 15 -o brazil_landslides -lt "Brazil Landslides, Feb. 2023"
 
 ```
 
@@ -98,20 +98,20 @@ opera-disaster run -b -24 -23.5 -45.75 -45.5 -m landslide -d 2023-02-01/2023-03-
 In this example, misclassified snow/ice classified pixels (likely sediment-rich water) are reclassified to open water using the DIST-HLS Confidence layer.
 Note: All snow/ice/sediment-rich water pixels are not reclassified using this approach.
 ```bash
-opera-disaster run -b 17.3 18.8 -78.6 -75.6 -m flood -d 2025-10-17/2025-11-04 -o hurricane_melissa_Oct2025 -rc -lt "Hurricane Melissa, Oct. 2025"
+opera-disaster run -b "17.3 18.8 -78.6 -75.6" -m flood -d 2025-10-17/2025-11-04 -o hurricane_melissa_Oct2025 -rc -lt "Hurricane Melissa, Oct. 2025"
 ```
 
 #### Example: Generate disturbance maps over Jamaica for Hurricane Melissa in October 2025
 In this example, a filter data (`-fd`) of October 28, 2025 (coinciding with hurricane landfall) is applied. All disturbance prior to this date is filtered out of the final mosaics.
 ```bash
-opera-disaster run -b 17.3 18.8 -78.6 -75.6 -m fire -d 2025-10-17/2025-11-04 -fd 2025-10-28 -o hurricane_melissa_Oct2025 -lt "Hurricane Melissa, Oct. 2025"
+opera-disaster run -b "17.3 18.8 -78.6 -75.6" -m fire -d 2025-10-17/2025-11-04 -fd 2025-10-28 -o hurricane_melissa_Oct2025 -lt "Hurricane Melissa, Oct. 2025"
 ```
 
 #### Example: Generate an RTC RGB composite visualization
 
 Create an 8-bit RGB composite from Sentinel-1 RTC backscatter data to visualize surface features using the 5 most recent passes.
 ```bash
-opera-disaster run -b 35.5 36.5 -107 -106 -m rtc-rgb -d 2026-02-01/2026-02-15 -o VallesCaldera_RTC -lt "Valles Caldera SAR Backscatter"
+opera-disaster run -b "35.5 36.5 -107 -106" -m rtc-rgb -d 2026-02-01/2026-02-15 -o VallesCaldera_RTC -lt "Valles Caldera SAR Backscatter"
 ```
 
 #### Example: Add a zoomed inset and disable coastal masking
@@ -130,7 +130,7 @@ You can process pre-downloaded OPERA GeoTIFFs stored on your local machine by us
 
 #### Basic Local Usage
 ```bash
-opera-disaster run -b 35 37 -115 -113 -m flood -ld /path/to/my/data -o LocalOutput -lt "Local Test"
+opera-disaster run -b "35 37 -115 -113" -m flood -ld /path/to/my/data -o LocalOutput -lt "Local Test"
 ```
 
 **Note:** The bounding box (`-b`) is still required to define the map extent and master grid alignment.
@@ -185,8 +185,8 @@ If `-b` is omitted, the command computes the geographic union of the local input
 
 | Argument             | Required | Description                                                                                   |
 |----------------------|----------|-----------------------------------------------------------------------------------------------|
-| `-b`, `--bbox`        | Yes      | AOI for `run`; accepts `South North West East`, WKT, a local geometry path, or a remote geometry URL |
-| `-zb`, `--zoom_bbox`  | No       | Optional inset extent for `run`, as `South North West East` |
+| `-b`, `--bbox`        | Yes      | AOI for `run`; accepts `South North West East`, WKT, a local geometry path, or a remote geometry URL. Must be enclosed in quotes. |
+| `-zb`, `--zoom_bbox`  | No       | Optional inset extent for `run`, as `South North West East`. Must be enclosed in quotes.|
 | `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results |
 | `-m`, `--mode`        | No       | Mode: `flood`, `fire`, `landslide`, `rtc-rgb`, or `earthquake`; defaults to `flood` for `run` |
 | `-ld`, `--local_dir`  | No       | Path to a local directory containing pre-downloaded OPERA GeoTIFFs. If provided, cloud search is skipped. |
