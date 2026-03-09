@@ -27,43 +27,68 @@ def get_master_crs(df_opera: pd.DataFrame, mode: str) -> Optional[str]:
     """
     logger.info("Determining Global Master CRS from geometric metadata...")
     from shapely import wkt
-    
-    # Grab all valid WKT geometries from the pre-filtered dataframe
-    valid_geoms = df_opera['Geometry (WKT)'].dropna()
-    valid_geoms = valid_geoms[valid_geoms != 'N/A']
-    
-    if valid_geoms.empty:
-        raise RuntimeError("Could not determine CRS: No valid geometries found in metadata.")
-        
+
+    valid_geoms = pd.Series(dtype=object)
+    if "Geometry (WKT)" in df_opera.columns:
+        # Grab all valid WKT geometries from the pre-filtered dataframe
+        valid_geoms = df_opera["Geometry (WKT)"].dropna()
+        valid_geoms = valid_geoms[valid_geoms != "N/A"]
+
     epsg_counter = Counter()
-    
+
     for geom_str in valid_geoms:
         try:
             geom = wkt.loads(geom_str)
             center_lon = geom.centroid.x
             center_lat = geom.centroid.y
-            
+
             # Geometrically calculate the UTM zone number
             zone_number = int((center_lon + 180) / 6) + 1
             is_northern = center_lat >= 0
-            
+
             # Map to standard EPSG codes for UTM
             epsg = 32600 + zone_number if is_northern else 32700 + zone_number
             epsg_counter[epsg] += 1
         except Exception:
             continue
-            
+
     if not epsg_counter:
-        raise RuntimeError("Could not calculate UTM zones from geometries.")
-        
+        logger.info("Falling back to raster header CRS detection.")
+        url_cols = [c for c in df_opera.columns if c.startswith("Download URL")]
+        all_files = []
+        for col in url_cols:
+            all_files.extend(df_opera[col].dropna().tolist())
+
+        crs_counter = Counter()
+        for filepath in set(all_files):
+            try:
+                with rasterio.open(filepath) as src:
+                    if src.crs is not None:
+                        crs_counter[src.crs.to_epsg() or src.crs.to_string()] += 1
+            except Exception:
+                continue
+
+        if not crs_counter:
+            raise RuntimeError(
+                "Could not determine CRS: no valid geometries or readable raster CRS metadata found."
+            )
+
+        most_common_crs, count = crs_counter.most_common(1)[0]
+        crs_obj = pyproj.CRS.from_user_input(most_common_crs)
+        logger.info(
+            f"Global Master CRS determined from raster headers: {crs_obj.name} ({crs_obj.to_string()})"
+        )
+        logger.info(f"Found in {count}/{len(set(all_files))} granules.")
+        return crs_obj.to_string()
+
     most_common_epsg, count = epsg_counter.most_common(1)[0]
-    
+
     crs_obj = pyproj.CRS.from_epsg(most_common_epsg)
     utm_name = crs_obj.name
-    
+
     logger.info(f"Global Master CRS determined: {utm_name} (EPSG:{most_common_epsg})")
     logger.info(f"Found in {count}/{len(valid_geoms)} granules.")
-    
+
     return f"EPSG:{most_common_epsg}"
 
 
