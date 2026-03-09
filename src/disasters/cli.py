@@ -247,5 +247,81 @@ def run(
         logger.info("Pipeline exited without running (e.g., earthquake mode).")
 
 
+@cli.command(name="download")
+@click.option(
+    "-b",
+    "--bbox",
+    type=str,
+    required=True,
+    help=(
+        "Bounding box or area of interest. MUST be enclosed in double quotes if it contains spaces. "
+        "Accepted formats: \"S N W E\" | \"POLYGON((...))\" | \"/path/to/file.kml\""
+    ),
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    required=True,
+    help="Directory where the 'data' folder and metadata will be saved.",
+)
+@click.option(
+    "-d",
+    "--date",
+    type=str,
+    required=False,
+    help="Date string (YYYY-MM-DD) OR a date range (YYYY-MM-DD/YYYY-MM-DD).",
+)
+@click.option(
+    "-n",
+    "--number-of-dates",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Number of most recent dates to consider for OPERA products.",
+)
+@click.option(
+    "-m",
+    "--mode",
+    type=click.Choice(VALID_MODES),
+    default=None,
+    required=False,
+    help="Optional: Filter downloads to only include products and layers relevant to a specific mode.",
+)
+def download(
+    bbox: str,
+    output_dir: Path,
+    date: Optional[str],
+    number_of_dates: int,
+    mode: Optional[str],
+) -> None:
+    """Download OPERA granules over an AOI/time window for local use."""
+    
+    # Process bbox tokens
+    bbox_parts = bbox.replace(",", " ").split()
+    if len(bbox_parts) == 4:
+        try:
+            bbox_arg = [float(x) for x in bbox_parts]
+        except ValueError:
+            bbox_arg = bbox
+    else:
+        bbox_arg = bbox
+
+    from .pipeline import run_download_only
+    
+    logger.info("Starting standalone download pipeline...")
+    out_dir = run_download_only(
+        bbox=bbox_arg,
+        output_dir=output_dir,
+        date=date,
+        number_of_dates=number_of_dates,
+        mode=mode
+    )
+    
+    if out_dir:
+        logger.info(f"Download complete. Files saved to: {out_dir}")
+    else:
+        logger.warning("Download pipeline exited without producing outputs.")
+
 if __name__ == "__main__":
     cli()

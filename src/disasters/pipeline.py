@@ -224,6 +224,124 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
     return mode_dir
 
 
+def run_download_only(bbox: Sequence[float] | str, output_dir: Path, date: str | None, number_of_dates: int, mode: str | None) -> Path | None:
+    """
+    Runs next_pass to discover products and downloads the raw GeoTIFFs to a local directory.
+    If 'mode' is specified, aggressively filters downloads to only include necessary datasets and auxiliary layers.
+    """
+    import shutil
+    from opera_utils.disp._remote import open_file
+    import concurrent.futures
+
+    # Authenticate with Earthdata
+    try:
+        username, password = authenticate()
+        logger.info("Authentication successful.")
+    except Exception as e:
+        logger.warning(f"Authentication failed: {e}")
+        return None
+
+    # Set up directories
+    ensure_directory(output_dir)
+    data_dir = ensure_directory(output_dir / "data")
+
+    logger.info("Running Cloud Search to discover available granules...")
+    next_pass_bbox = [bbox] if isinstance(bbox, str) else bbox
+    
+    # Run the next_pass engine
+    output_dir_np = next_pass.run_next_pass(
+        bbox=next_pass_bbox,
+        number_of_dates=number_of_dates,
+        date=date,
+        functionality="opera_search"
+    )
+    
+    output_dir_np = Path(output_dir_np)
+    
+    # Read the metadata
+    df_opera = read_opera_metadata(output_dir_np)
+    if df_opera.empty:
+        logger.warning("No products found for the specified criteria.")
+        return None
+
+    # Apply Mode Filtering if requested
+    if mode is not None:
+        logger.info(f"Filtering downloads for '{mode}' mode...")
+        
+        # Define target datasets and primary + auxiliary layers
+        if mode == "flood":
+            short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+            target_layers = ["WTR", "BWTR", "CONF"] 
+        elif mode == "fire":
+            short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
+            target_layers = ["VEG-ANOM-MAX", "VEG-DIST-STATUS", "VEG-DIST-DATE", "VEG-DIST-CONF"]
+        elif mode == "landslide":
+            short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
+            target_layers = ["VEG-ANOM-MAX", "VEG-DIST-STATUS", "VEG-DIST-DATE", "VEG-DIST-CONF", "RTC-VV", "RTC-VH"]
+        elif mode == "rtc-rgb":
+            short_names = ["OPERA_L2_RTC-S1_V1"]
+            target_layers = ["RTC-VV", "RTC-VH"]
+        elif mode == "earthquake":
+            logger.info("Earthquake mode coming soon. Exiting...")
+            return None
+            
+        # Filter rows by Dataset
+        df_opera = df_opera[df_opera["Dataset"].isin(short_names)]
+        
+        # Filter URL columns by Layer
+        url_cols = [f"Download URL {layer}" for layer in target_layers if f"Download URL {layer}" in df_opera.columns]
+        
+    else:
+        logger.info("No mode specified. Downloading ALL available OPERA products and layers.")
+        url_cols = [c for c in df_opera.columns if c.startswith("Download URL")]
+
+    if df_opera.empty or not url_cols:
+        logger.warning(f"No corresponding products found in the catalog for mode: {mode}")
+        return None
+
+    # Copy the metadata excel file to the user's output directory
+    metadata_file = output_dir_np / "opera_products_metadata.xlsx"
+    if metadata_file.exists():
+        shutil.copy(metadata_file, output_dir / "opera_products_metadata.xlsx")
+
+    # Extract all valid URLs
+    urls_to_download = []
+    for c in url_cols:
+        urls_to_download.extend(df_opera[c].dropna().tolist())
+    urls_to_download = list(set(urls_to_download))
+
+    if not urls_to_download:
+        logger.warning("No valid download URLs found after filtering.")
+        return None
+
+    logger.info(f"Found {len(urls_to_download)} files to download.")
+
+    # Multithreaded Downloader Function
+    def download_file(url):
+        filename = url.split('/')[-1]
+        local_path = data_dir / filename
+        
+        # Skip if already downloaded
+        if local_path.exists():
+            logger.info(f"File already exists, skipping: {filename}")
+            return
+            
+        logger.info(f"Downloading {filename}...")
+        try:
+            # Use Earthdata authenticated file opener and stream to disk chunk-by-chunk
+            with open_file(url, earthdata_username=username, earthdata_password=password) as f_in:
+                with open(local_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+        except Exception as e:
+            logger.error(f"Failed to download {filename}: {e}")
+
+    # Download concurrently
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        list(executor.map(download_file, urls_to_download))
+
+    return data_dir
+
+
 def run_plotting_task(
     maps_dir, layouts_dir, mosaic_path, short_name, layer, 
     date_id, layout_date, layout_title, bbox, zoom_bbox, 
