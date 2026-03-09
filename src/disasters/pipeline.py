@@ -578,7 +578,13 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
                     
                     image = array_to_image(mosaic, colormap=colormap, nodata=nodata)
                     copy(image, tmp_path, driver="GTiff")
-                    gdal.Warp(str(mosaic_path), str(tmp_path), xRes=30, yRes=30, creationOptions=["COMPRESS=DEFLATE"])
+                    gdal.Warp(
+                        str(mosaic_path),
+                        str(tmp_path),
+                        xRes=target_res,
+                        yRes=target_res,
+                        creationOptions=["COMPRESS=DEFLATE"],
+                    )
                     save_gtiff_as_cog(mosaic_path, mosaic_path)
                     cleanup_temp_file(tmp_path)
                     
@@ -590,7 +596,13 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
                         
                         conf_image = array_to_image(conf_mosaic, colormap=None, nodata=255)
                         copy(conf_image, conf_tmp, driver="GTiff")
-                        gdal.Warp(str(conf_path), str(conf_tmp), xRes=30, yRes=30, creationOptions=["COMPRESS=DEFLATE"])
+                        gdal.Warp(
+                            str(conf_path),
+                            str(conf_tmp),
+                            xRes=target_res,
+                            yRes=target_res,
+                            creationOptions=["COMPRESS=DEFLATE"],
+                        )
                         save_gtiff_as_cog(conf_path, conf_path)
                         cleanup_temp_file(conf_tmp)
 
