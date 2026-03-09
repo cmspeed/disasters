@@ -1,0 +1,16 @@
+# Python runtime dependencies for packaging metadata.
+# Conda-native/system packages such as GDAL remain managed by environment.yml.
+boto3
+click
+earthaccess
+matplotlib
+next_pass @ git+https://github.com/OPERA-Cal-Val/next_pass.git@main
+numpy
+openpyxl
+opera-utils==0.25.3
+pandas
+pygmt
+pyproj
+rasterio
+rioxarray<0.20.0
+xarray
