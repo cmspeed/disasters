@@ -5,10 +5,11 @@ dependencies:
   - python=3.12
   - gdal=3.12
   - libgdal=3.12
-  - numpy<2.0
+  - numpy
   - asf_search
   - beautifulsoup4
   - boto3
+  - click
   - earthaccess
   - geopandas
   - jupyterlab
@@ -16,6 +17,7 @@ dependencies:
   - lxml
   - matplotlib
   - opera-utils=0.25.3
+  - pandas
   - pip
   - pygmt
   - rasterio
@@ -23,7 +25,7 @@ dependencies:
   - tabulate
   - xarray
   - zarr
-  - openpyxl 
-  
+  - openpyxl
+
   - pip:
       - git+https://github.com/OPERA-Cal-Val/next_pass.git@main
