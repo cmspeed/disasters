@@ -171,7 +171,8 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
             bbox=next_pass_bbox,
             number_of_dates=config.number_of_dates,
             date=config.date,
-            functionality=config.functionality
+            functionality=config.functionality,
+            compute_cloudiness=False
         )
         
         output_dir = Path(output_dir)
@@ -313,7 +314,8 @@ def run_download_only(bbox: Sequence[float] | str, output_dir: Path, date: str |
         bbox=next_pass_bbox,
         number_of_dates=number_of_dates,
         date=date,
-        functionality="opera_search"
+        functionality="opera_search",
+        compute_cloudiness=False
     )
     
     output_dir_np = Path(output_dir_np)
