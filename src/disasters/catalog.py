@@ -52,6 +52,32 @@ def read_opera_metadata(output_dir: Path) -> pd.DataFrame:
     # Combine differently parsed datetimes into a single column
     df["Start Time"] = df_temp1.combine_first(df_temp2)
 
+    granule_col = 'Granule ID' if 'Granule ID' in df.columns else 'Granule'
+    
+    if granule_col in df.columns:
+        # Create a "Scene_ID" by removing the Processing Date.
+        df['Scene_ID'] = df[granule_col].str.replace(
+            r'(_\d{8}T\d{6}Z)(_\d{8}T\d{6}Z)', 
+            r'\1', 
+            regex=True
+        )
+
+        # Sort alphabetically by Granule ID string (chronologically, newest processing date at the bottom).
+        df = df.sort_values(granule_col)
+
+        # Drop duplicates based on the Scene ID, keeping the 'last' (newest ProcessingTime).
+        original_len = len(df)
+        df = df.drop_duplicates(subset=['Scene_ID'], keep='last')
+        dropped_count = original_len - len(df)
+        
+        if dropped_count > 0:
+            logger.info(f"Deduplicated {dropped_count} ghost granule(s) by keeping the newest processing dates.")
+
+        # Clean up the temp column
+        df = df.drop(columns=['Scene_ID'])
+    else:
+        logger.warning(f"Could not find Granule ID column. Skipping deduplication.")
+
     return df
 
 
