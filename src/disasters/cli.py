@@ -172,6 +172,13 @@ def cli() -> None:
     default=False,
     help="If set, skips the coastal masking step.",
 )
+@click.option(
+    "-c",
+    "--compute_cloudiness",
+    is_flag=True,
+    default=False,
+    help="Enable HLS cloud cover calculation. This may significantly increase runtime, especially for large AOIs or wide date ranges."
+)
 
 def run(
     bbox: str,
@@ -189,7 +196,8 @@ def run(
     reclassify_snow_ice: bool,
     slope_threshold: Optional[int],
     benchmark: bool,
-    no_mask: bool
+    no_mask: bool,
+    compute_cloudiness: bool
 ) -> None:
     """Run the disaster pipeline (end-to-end)."""
     # Ensure slope values are between 0 and 100 degrees, if provided
@@ -237,7 +245,8 @@ def run(
         reclassify_snow_ice=reclassify_snow_ice,
         slope_threshold=slope_threshold,
         benchmark=benchmark,
-        no_mask=no_mask
+        no_mask=no_mask,
+        compute_cloudiness=compute_cloudiness
     )
 
     mode_dir = run_pipeline(cfg)
@@ -288,6 +297,13 @@ def run(
     required=False,
     help="Optional: Filter downloads to only include products and layers relevant to a specific mode.",
 )
+@click.option(
+    "-c",
+    "--compute_cloudiness",
+    is_flag=True,
+    default=False,
+    help="Enable HLS cloud cover calculation. This may significantly increase runtime, especially for large AOIs or wide date ranges."
+)
 
 def download(
     bbox: str,
@@ -295,6 +311,7 @@ def download(
     date: Optional[str],
     number_of_dates: int,
     mode: Optional[str],
+    compute_cloudiness: bool
 ) -> None:
     """Download OPERA granules over an AOI/time window for local use."""
     
@@ -316,7 +333,8 @@ def download(
         output_dir=output_dir,
         date=date,
         number_of_dates=number_of_dates,
-        mode=mode
+        mode=mode,
+        compute_cloudiness=compute_cloudiness
     )
     
     if out_dir:
