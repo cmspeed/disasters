@@ -72,10 +72,10 @@ When `-ld/--local_dir` is used, the pipeline skips cloud search and scans local 
 opera-disaster run -b "35 37 -115 -113" -m flood -n 2 -o LakeMead -lt "Lake Mead Floods"
 ```
 
-#### Example: Query a strict date range (Flood Mode)
-Generate products within a specific multi-week window.
+#### Example: Query a strict date range (Fire Mode)
+Generate products within a specific multi-week window over Los Angeles corresponding to wildfires. Disturbance prior to the fires is removed with `-fd`.
 ```bash
-opera-disaster run -b "35.5 36.5 -107 -106" -m flood -d 2026-02-01/2026-02-15 -o VallesCaldera -lt "Valles Caldera Flooding"
+opera-disaster run -b "33.5 35 -119.5 -117" -m fire -d 2025-01-01/2025-01-15 -fd 2025-01-01 -o LA_fires -lt "Los Angeles Fires, January 2025"
 ```
 
 #### Example: Generate fire impact maps over New Mexico using the five (default) most recent OPERA products
@@ -85,13 +85,19 @@ opera-disaster run -b "32 34 -106.5 -104" -m fire -o NM_Fires -lt "New Mexico Fi
 
 #### Example: Generate fire impact maps over a wildfire in Quebec using the most recent 30 OPERA products (prior to 07-31-2023), filtered to remove disturbance prior to 05-15-2023
 ```bash
-opera-disaster run -b "48 49.5 -77.5 -74.4" -m fire -d 2023-07-31 -n 30  -fd 2023-05-15 -o QuebecFires -lt "Quebec Wildfire, Summer 2023"
+opera-disaster run -b "48 49.5 -77.5 -74.4" -m fire -d 2023-07-31 -n 30 -fd 2023-05-15 -o QuebecFires -lt "Quebec Wildfire, Summer 2023"
 ```
 
-#### Example: Generate landslide impact maps over a landslide in Brazil in February 2023, retaining only pixels with slopes greater than 15 degrees (slope filtering is optional)
+#### Example: Generate landslide impact maps over a landslide in Brazil in February 2023
+This command uses the `-st` argument to retain only pixels with slopes greater than 15 degrees (slope filtering is optional)
 ```bash
 opera-disaster run -b "-24 -23.5 -45.75 -45.5" -m landslide -d 2023-02-01/2023-03-01 -fd 2023-02-01 -zb "-23.783 -23.733 -45.733 -45.683" -st 15 -o brazil_landslides -lt "Brazil Landslides, Feb. 2023"
+```
 
+#### Example: Generate flood maps over Rio Grande do Sol, Brazil in April-May 2024
+Sediment-rich water pixels are often flagged as snow/ice. This command reclassifies snow/ice pixels to water and computes cloudiness from the HLS granules.
+```bash
+opera-disaster run -b "-30.5 -29.5 -52 -51" -m flood -d 2024-04-20/2024-05-08 -o RioGrandeDoSulFloods2024 -lt "Rio Grande Do Sul Floods, Brazil, 2024" -rc -c
 ```
 
 #### Example: Generate flood maps over Jamaica for Hurricane Melissa in October 2025
@@ -186,7 +192,6 @@ If `-b` is omitted, the command computes the geographic union of the local input
 | Argument             | Required | Description                                                                                   |
 |----------------------|----------|-----------------------------------------------------------------------------------------------|
 | `-b`, `--bbox`        | Yes      | AOI for `run`; accepts `South North West East`, WKT, a local geometry path, or a remote geometry URL. Must be enclosed in quotes. |
-| `-zb`, `--zoom_bbox`  | No       | Optional inset extent for `run`, as `South North West East`. Must be enclosed in quotes.|
 | `-o`, `--output_dir`  | Yes      | Output directory or prefix for storing results |
 | `-m`, `--mode`        | No       | Mode: `flood`, `fire`, `landslide`, `rtc-rgb`, or `earthquake`; defaults to `flood` for `run` |
 | `-ld`, `--local_dir`  | No       | Path to a local directory containing pre-downloaded OPERA GeoTIFFs. If provided, cloud search is skipped. |
@@ -201,6 +206,8 @@ If `-b` is omitted, the command computes the geographic union of the local input
 | `-st`, `--slope_threshold` | No     | Slope threshold in degrees (0-100); applied to `landslide` and `rtc-rgb` outputs when DEM-derived slope data can be built |
 | `--benchmark` | No | Reports timing comparisons for loading, plotting, and differencing |
 | `--no-mask` | No | Skips the global coastal masking step |
+| `-c`, `--compute_cloudiness` | No | Flag to enable HLS cloud cover calculation during the search step. |
+| `-zb`, `--zoom_bbox`  | No       | Optional inset extent for `run`, as `South North West East`. Must be enclosed in quotes.|
 
 ### Disaster Modes
 

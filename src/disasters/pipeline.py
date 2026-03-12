@@ -73,6 +73,7 @@ class PipelineConfig:
     slope_threshold: int | None = None
     benchmark: bool = False
     no_mask: bool = False
+    compute_cloudiness: bool = False
 
 
 def get_local_spatial_properties(df_opera: pd.DataFrame) -> tuple[list[float], str]:
@@ -171,7 +172,8 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
             bbox=next_pass_bbox,
             number_of_dates=config.number_of_dates,
             date=config.date,
-            functionality=config.functionality
+            functionality=config.functionality,
+            compute_cloudiness=config.compute_cloudiness
         )
         
         output_dir = Path(output_dir)
@@ -284,10 +286,26 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
     return mode_dir
 
 
-def run_download_only(bbox: Sequence[float] | str, output_dir: Path, date: str | None, number_of_dates: int, mode: str | None) -> Path | None:
+def run_download_only(
+    bbox: Sequence[float] | str, 
+    output_dir: Path, 
+    date: str | None = None, 
+    number_of_dates: int = 5, 
+    mode: str | None = None,
+    functionality: str = "opera_search",
+    compute_cloudiness: bool = False
+) -> Path | None:
     """
     Runs next_pass to discover products and downloads the raw GeoTIFFs to a local directory.
     If 'mode' is specified, aggressively filters downloads to only include necessary datasets and auxiliary layers.
+
+    Args:
+        bbox (Sequence[float] | str): Bounding box in [S, N, W, E] format, WKT, or geojson path.
+        output_dir (Path): Local directory to save downloaded files.
+        date (str | None): Optional date string for filtering products.
+        number_of_dates (int): Number of dates to retrieve if 'date' is specified.
+        mode (str | None): If specified, filters downloads to only include relevant datasets/layers for this mode.
+        compute_cloudiness (bool): Whether to compute cloudiness metrics during next_pass search.
     """
     import shutil
     from opera_utils.disp._remote import open_file
@@ -313,7 +331,8 @@ def run_download_only(bbox: Sequence[float] | str, output_dir: Path, date: str |
         bbox=next_pass_bbox,
         number_of_dates=number_of_dates,
         date=date,
-        functionality="opera_search"
+        functionality=functionality,
+        compute_cloudiness=compute_cloudiness
     )
     
     output_dir_np = Path(output_dir_np)
