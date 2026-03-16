@@ -287,10 +287,10 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
 
 
 def run_search_only(
-    bbox: Sequence[float] | str, 
-    output_dir: Path, 
-    date: str | None = None, 
-    number_of_dates: int = 5, 
+    bbox: Sequence[float] | str,
+    output_dir: Path,
+    date: str | None = None,
+    number_of_dates: int = 5,
     mode: str | None = None,
     functionality: str = "opera_search",
     compute_cloudiness: bool = False
@@ -312,7 +312,7 @@ def run_search_only(
 
     logger.info("Running Cloud Search to discover available granules...")
     next_pass_bbox = [bbox] if isinstance(bbox, str) else bbox
-    
+
     # Run the next_pass engine
     output_dir_np = next_pass.run_next_pass(
         bbox=next_pass_bbox,
@@ -321,19 +321,18 @@ def run_search_only(
         functionality=functionality,
         compute_cloudiness=compute_cloudiness
     )
-    
+
     output_dir_np = Path(output_dir_np)
-    
+
     # Move the nextpass output folder into user-specified directory
     dest = output_dir / output_dir_np.name
     if output_dir_np.resolve() != dest.resolve():
-        if not dest.exists():
-            shutil.move(str(output_dir_np), str(dest))
-            output_dir_np = dest
-        else:
-            logger.warning(f"Destination {dest} already exists. Using existing folder.")
-            output_dir_np = dest
-    
+        if dest.exists():
+            logger.warning(f"Destination {dest} already exists. Replacing it with fresh search results.")
+            shutil.rmtree(dest)
+        shutil.move(str(output_dir_np), str(dest))
+        output_dir_np = dest
+
     # Read the metadata just to provide a helpful summary to the user
     df_opera = read_opera_metadata(output_dir_np)
     if df_opera.empty:
@@ -352,7 +351,7 @@ def run_search_only(
             short_names = ["OPERA_L2_RTC-S1_V1"]
         else:
             short_names = []
-            
+
         df_filtered = df_opera[df_opera["Dataset"].isin(short_names)]
         logger.info(f"Search complete. Found {len(df_filtered)} granules relevant to '{mode}' mode (out of {len(df_opera)} total).")
     else:
