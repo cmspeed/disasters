@@ -349,6 +349,9 @@ def run_search_only(
             short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
         elif mode == "rtc-rgb":
             short_names = ["OPERA_L2_RTC-S1_V1"]
+        elif mode == "earthquake":
+            logger.info("Earthquake mode coming soon. Exiting...")
+            return None
         else:
             short_names = []
 
