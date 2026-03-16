@@ -256,6 +256,92 @@ def run(
         logger.info("Pipeline exited without running (e.g., earthquake mode).")
 
 
+@cli.command(name="search")
+@click.option(
+    "-b",
+    "--bbox",
+    type=str,
+    required=True,
+    help=(
+        "Bounding box or area of interest. MUST be enclosed in double quotes if it contains spaces. "
+        "Accepted formats: \"S N W E\" | \"POLYGON((...))\" | \"/path/to/file.kml\""
+    ),
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    required=True,
+    help="Directory where the metadata will be saved.",
+)
+@click.option(
+    "-d",
+    "--date",
+    type=str,
+    required=False,
+    help="Date string (YYYY-MM-DD) OR a date range (YYYY-MM-DD/YYYY-MM-DD).",
+)
+@click.option(
+    "-n",
+    "--number-of-dates",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Number of most recent dates to consider for OPERA products.",
+)
+@click.option(
+    "-m",
+    "--mode",
+    type=click.Choice(VALID_MODES),
+    default=None,
+    required=False,
+    help="Optional: Filter summary to only count products relevant to a specific mode.",
+)
+@click.option(
+    "-c",
+    "--compute_cloudiness",
+    is_flag=True,
+    default=False,
+    help="Enable HLS cloud cover calculation."
+)
+def search(
+    bbox: str,
+    output_dir: Path,
+    date: Optional[str],
+    number_of_dates: int,
+    mode: Optional[str],
+    compute_cloudiness: bool
+) -> None:
+    """Query OPERA catalog and save metadata without downloading imagery."""
+    
+    # Process bbox tokens
+    bbox_parts = bbox.replace(",", " ").split()
+    if len(bbox_parts) == 4:
+        try:
+            bbox_arg = [float(x) for x in bbox_parts]
+        except ValueError:
+            bbox_arg = bbox
+    else:
+        bbox_arg = bbox
+
+    from .pipeline import run_search_only
+    
+    logger.info("Starting standalone search pipeline...")
+    out_dir = run_search_only(
+        bbox=bbox_arg,
+        output_dir=output_dir,
+        date=date,
+        number_of_dates=number_of_dates,
+        mode=mode,
+        compute_cloudiness=compute_cloudiness
+    )
+    
+    if out_dir:
+        logger.info(f"Metadata safely saved to: {out_dir}")
+    else:
+        logger.warning("Search pipeline exited without producing outputs.")
+
+
 @cli.command(name="download")
 @click.option(
     "-b",
