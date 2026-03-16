@@ -286,6 +286,81 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
     return mode_dir
 
 
+def run_search_only(
+    bbox: Sequence[float] | str, 
+    output_dir: Path, 
+    date: str | None = None, 
+    number_of_dates: int = 5, 
+    mode: str | None = None,
+    functionality: str = "opera_search",
+    compute_cloudiness: bool = False
+) -> Path | None:
+    """
+    Runs next_pass to discover products and generate metadata without downloading imagery.
+
+    Args:
+        bbox (Sequence[float] | str): Bounding box in [S, N, W, E] format, WKT, or geojson path.
+        output_dir (Path): Local directory to save the metadata file.
+        date (str | None): Optional date string for filtering products.
+        number_of_dates (int): Number of dates to retrieve if 'date' is specified.
+        mode (str | None): If specified, filters the metadata summary to only include relevant datasets/layers for this mode.
+        compute_cloudiness (bool): Whether to compute cloudiness metrics during next_pass search.
+    """
+    import shutil
+
+    ensure_directory(output_dir)
+
+    logger.info("Running Cloud Search to discover available granules...")
+    next_pass_bbox = [bbox] if isinstance(bbox, str) else bbox
+    
+    # Run the next_pass engine
+    output_dir_np = next_pass.run_next_pass(
+        bbox=next_pass_bbox,
+        number_of_dates=number_of_dates,
+        date=date,
+        functionality=functionality,
+        compute_cloudiness=compute_cloudiness
+    )
+    
+    output_dir_np = Path(output_dir_np)
+    
+    # Move the nextpass output folder into user-specified directory
+    dest = output_dir / output_dir_np.name
+    if output_dir_np.resolve() != dest.resolve():
+        if not dest.exists():
+            shutil.move(str(output_dir_np), str(dest))
+            output_dir_np = dest
+        else:
+            logger.warning(f"Destination {dest} already exists. Using existing folder.")
+            output_dir_np = dest
+    
+    # Read the metadata just to provide a helpful summary to the user
+    df_opera = read_opera_metadata(output_dir_np)
+    if df_opera.empty:
+        logger.warning("No products found for the specified criteria.")
+        return output_dir_np
+
+    # If mode is provided, calculate how many of those found granules actually apply to the mode
+    if mode is not None:
+        if mode == "flood":
+            short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+        elif mode == "fire":
+            short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
+        elif mode == "landslide":
+            short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L2_RTC-S1_V1"]
+        elif mode == "rtc-rgb":
+            short_names = ["OPERA_L2_RTC-S1_V1"]
+        else:
+            short_names = []
+            
+        df_filtered = df_opera[df_opera["Dataset"].isin(short_names)]
+        logger.info(f"Search complete. Found {len(df_filtered)} granules relevant to '{mode}' mode (out of {len(df_opera)} total).")
+    else:
+        logger.info(f"Search complete. Found {len(df_opera)} total OPERA granules.")
+
+    return output_dir_np
+
+
 def run_download_only(
     bbox: Sequence[float] | str, 
     output_dir: Path, 
