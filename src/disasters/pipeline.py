@@ -791,6 +791,30 @@ def run_difference_pipeline(
     return t_diff, t_plot
 
 
+def run_max_extent_pipeline(
+    input_paths, out_path, maps_dir, layouts_dir, short_name, layer,
+    diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
+    reclassify_snow_ice
+) -> float:
+    """Computes max flood extent and waits for it to finish before plotting."""
+    from .diff import compute_and_write_max_flood_extent
+    
+    # Generate the tiff
+    try:
+        compute_and_write_max_flood_extent(input_paths, out_path)
+    except Exception as e:
+        logger.error(f"Max Extent computation failed: {e}")
+        return 0.0
+        
+    # Plot it aftergeneration is complete
+    run_plotting_task(
+        maps_dir, layouts_dir, out_path, short_name, layer,
+        diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
+        reclassify_snow_ice, False
+    )
+    return 0.0
+
+
 def run_rgb_task(vv_path, vh_path, rgb_path) -> float:
     """
     Wrapper function to execute RTC RGB composite visualizations and catch exceptions.
@@ -1324,7 +1348,40 @@ def generate_products(
                                 reclassify_snow_ice
                             )
                             differencing_futures.append(future)
+        
+        # Compute Maximum Flood Extent
+        if mode == "flood":
+            logger.info("Submitting maximum flood extent tasks...")
+            
+            for short_name_k, layers_dict in mosaic_index.items():
+                if "WTR" not in layers_dict: 
+                    continue
+                    
+                date_map = layers_dict["WTR"]
+                pass_ids = sorted(date_map.keys())
+                
+                # Requires at least 2 dates for a cumulative map
+                if len(pass_ids) < 2:
+                    continue 
+                
+                input_paths = [date_map[pid]["path"] for pid in pass_ids]
+                
+                earliest_date = pass_ids[0]
+                latest_date = pass_ids[-1]
+                out_name = f"{short_name_k}_WTR_{earliest_date}_{latest_date}_max_extent.tif"
+                out_path = data_dir / out_name
 
+                diff_id_str = f"{earliest_date}_{latest_date}"
+                diff_date_str_layout = f"{earliest_date}, {latest_date}"
+                
+                future = executor.submit(
+                    run_max_extent_pipeline,
+                    input_paths, out_path,
+                    maps_dir, layouts_dir, short_name_k, "MAX-EXTENT",
+                    diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
+                    reclassify_snow_ice
+                )
+                differencing_futures.append(future)
     finally:
         logger.info("Waiting for all background tasks to finish...")
         executor.shutdown(wait=True)

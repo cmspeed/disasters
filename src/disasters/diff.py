@@ -367,6 +367,104 @@ def compute_and_write_difference_positive_change_only(
     return
 
 
+def compute_and_write_max_flood_extent(
+    input_paths: list[Path],
+    out_path: Path,
+) -> None:
+    """
+    Computes a cumulative 'Maximum Flood Extent' raster from a time-series of DSWx mosaics.
+    
+    Logic (Assign 1 - Blue):
+      - If the pixel was EVER classified as water (1=Open, 2=Partial, 3=Inundated Veg)
+        across any of the time slices.
+    
+    Logic (Assign 0 - White):
+      - If the pixel was NEVER water, but had valid observations (0) in at least one slice.
+      
+    Logic (Assign 255 - NoData):
+      - If the pixel was masked/invalid (>= 250) across ALL time slices.
+
+    Args:
+        input_paths (list[Path]): Chronological list of raster paths to process.
+        out_path (Path): Output destination for the cumulative COG.
+    """
+    logger.info(f"Computing maximum flood extent for {out_path.name}...")
+
+    any_water_mask = None
+    ever_valid_mask = None
+    
+    base_x = None
+    base_y = None
+    base_crs = None
+    base_transform = None
+
+    water_classes = [1, 2, 3]
+
+    for i, path in enumerate(input_paths):
+        with rioxarray.open_rasterio(path, masked=False) as da:
+            # Extract raw numpy arrays
+            val = da.squeeze().values.copy()
+            
+            if i == 0:
+                base_x = da.x.values.copy()
+                base_y = da.y.values.copy()
+                base_crs = da.rio.crs
+                base_transform = da.rio.transform()
+                any_water_mask = np.zeros_like(val, dtype=bool)
+                ever_valid_mask = np.zeros_like(val, dtype=bool)
+
+            valid_mask = val < 250
+            water_mask = np.isin(val, water_classes)
+
+            ever_valid_mask |= valid_mask
+            any_water_mask |= (valid_mask & water_mask)
+
+    # Construct the final array
+    out_data = np.zeros_like(any_water_mask, dtype="uint8")
+    out_data[ever_valid_mask] = 0 
+    out_data[any_water_mask] = 1  
+    out_data[~ever_valid_mask] = 255 
+
+    # Build DataArray entirely from scratch in memory
+    da_out = xr.DataArray(
+        out_data,
+        coords={"y": base_y, "x": base_x},
+        dims=["y", "x"]
+    )
+    da_out.rio.write_crs(base_crs, inplace=True)
+    da_out.rio.write_nodata(255, inplace=True)
+    da_out.rio.write_transform(base_transform, inplace=True)
+
+    # Write to Temporary GeoTIFF
+    tmp_gtiff = out_path.with_suffix(".tmp.tif")
+    da_out.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True, dtype="uint8")
+
+    # Add a Colormap and Metadata
+    custom_colormap = {
+        0: (255, 255, 255, 255), # White (Not Water)
+        1: (0, 0, 200, 255)      # Blue (Maximum Flood Extent)
+    }
+    class_names = {
+        0: "Never Flooded",
+        1: "Maximum Flood Extent"
+    }
+
+    with rasterio.open(tmp_gtiff, 'r+') as dst:
+        dst.write_colormap(1, custom_colormap)
+        tags = {f"CLASS_{k}": v for k, v in class_names.items()}
+        dst.update_tags(**tags)
+
+    # Convert to COG
+    save_gtiff_as_cog(tmp_gtiff, out_path)
+
+    try:
+        tmp_gtiff.unlink(missing_ok=True)
+    except:
+        pass
+
+    logger.info(f"Maximum flood extent written to {out_path}")
+
+
 def create_rtc_rgb_visualization(vv_path: Path | str, vh_path: Path | str, out_path: Path | str) -> None:
     """
     Creates an 8-bit 3-band RGB composite from Float32 VV and VH mosaics using windowed processing.
@@ -393,10 +491,10 @@ def create_rtc_rgb_visualization(vv_path: Path | str, vh_path: Path | str, out_p
         # Apply the linear stretch formula.
         stretched = (arr_sqrt - vmin) / (vmax - vmin) * 255
         
-        # 3. Handle valid but very low values.
+        # Handle valid but very low values.
         stretched_clamped = np.clip(stretched, 1, 255)
         
-        # 4. Handle Nodata
+        # Handle Nodata
         np.nan_to_num(stretched_clamped, copy=False, nan=0.0)
         
         return stretched_clamped.astype(np.uint8)
