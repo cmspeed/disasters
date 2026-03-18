@@ -795,7 +795,7 @@ def run_max_extent_pipeline(
     input_paths, out_path, maps_dir, layouts_dir, short_name, layer,
     diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
     reclassify_snow_ice
-) -> float:
+) -> tuple:
     """Computes max flood extent and waits for it to finish before plotting."""
     from .diff import compute_and_write_max_flood_extent
     
@@ -804,15 +804,15 @@ def run_max_extent_pipeline(
         compute_and_write_max_flood_extent(input_paths, out_path)
     except Exception as e:
         logger.error(f"Max Extent computation failed: {e}")
-        return 0.0
+        return 0.0, 0.0
         
-    # Plot it aftergeneration is complete
+    # Plot it after generation is complete
     run_plotting_task(
         maps_dir, layouts_dir, out_path, short_name, layer,
         diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
         reclassify_snow_ice, False
     )
-    return 0.0
+    return 0.0, 0.0
 
 
 def run_rgb_task(vv_path, vh_path, rgb_path) -> float:

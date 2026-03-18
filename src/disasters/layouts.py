@@ -169,7 +169,8 @@ def make_map(
         )
 
         # Load mosaic from the temporary file
-        grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
+        ds = rioxarray.open_rasterio(mosaic_wgs84)
+        grd = ds.squeeze()
 
         # Handle Nodata
         try:
@@ -714,7 +715,7 @@ def make_map(
         # Export map and cleanup
         map_name = maps_dir / f"{short_name}_{layer}_{date_str}{utm_suffix}_map.png"
         fig.savefig(map_name, dpi=900)
-        grd.close()
+        ds.close()
         cleanup_temp_file(mosaic_wgs84)
 
         # Remove all temp CPTs and Legends after all maps are drawn
