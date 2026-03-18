@@ -199,33 +199,17 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
 
     # Convert WKT/File to an SNWE list for internal mosaicking logic
     if isinstance(config.bbox, str):
-        if config.local_dir:
-            # If in local mode, we don't assume next_pass utilities are available.
-            # We must use a simple fallback to parse the WKT into a bounding box.
-            try:
-                from shapely import wkt
-                geom = wkt.loads(config.bbox)
-                minx, miny, maxx, maxy = geom.bounds
-                internal_bbox = [miny, maxy, minx, maxx]
-                logger.info(f"Extracted SNWE bounds from WKT for local mode: {internal_bbox}")
-            except Exception as e:
-                logger.error("In local mode, the -b argument must be 'S N W E' or a valid WKT POLYGON.")
-                logger.error(f"Failed to parse WKT: {e}")
-                return None
-        else:
-            # If in Cloud Search mode, leverage next_pass's robust parsers
-            try:
-                from utils.utils import bbox_type, bbox_to_geometry
-                bbox_parsed = bbox_type([config.bbox])
-                geom, bounds, centroid = bbox_to_geometry(bbox_parsed, mode_dir)
-                
-                # bounds is (minx, miny, maxx, maxy) -> mapping to [S, N, W, E]
-                minx, miny, maxx, maxy = bounds
-                internal_bbox = [miny, maxy, minx, maxx]
-                logger.info(f"Extracted SNWE bounding envelope from geometry: {internal_bbox}")
-            except Exception as e:
-                logger.error(f"Failed to parse geometry from string/file: {e}")
-                return None
+        # Use next_pass parsers for both local and cloud modes
+        try:
+            from utils.utils import bbox_type, bbox_to_geometry
+            bbox_parsed = bbox_type([config.bbox])
+            geom, bounds, centroid = bbox_to_geometry(bbox_parsed, mode_dir)
+            minx, miny, maxx, maxy = bounds
+            internal_bbox = [miny, maxy, minx, maxx]
+            logger.info(f"Extracted SNWE bounding envelope from geometry: {internal_bbox}")
+        except Exception as e:
+            logger.error(f"Failed to parse geometry from string/file (KML, GeoJSON, WKT): {e}")
+            return None
     else:
         internal_bbox = list(config.bbox)
 
