@@ -139,6 +139,18 @@ def make_map(
             date_str = f"{date_later}_{date_earlier}_diff"
         else:
             date_str = date
+    elif layer == "MAX-EXTENT":
+        # Extract early/late dates from the max extent filename
+        match = re.search(
+            r"((?:\d{4}-\d{2}-\d{2})|(?:\d{8}t\d{4}))_((?:\d{4}-\d{2}-\d{2})|(?:\d{8}t\d{4}))_max_extent",
+            str(mosaic_path),
+        )
+        if match:
+            date_earlier = match.group(1)
+            date_later = match.group(2)
+            date_str = f"{date_earlier}_{date_later}_max_extent"
+        else:
+            date_str = date
     else:
         date_str = date
 
@@ -157,7 +169,8 @@ def make_map(
         )
 
         # Load mosaic from the temporary file
-        grd = rioxarray.open_rasterio(mosaic_wgs84).squeeze()
+        ds = rioxarray.open_rasterio(mosaic_wgs84)
+        grd = ds.squeeze()
 
         # Handle Nodata
         try:
@@ -311,10 +324,37 @@ def make_map(
                         
                     fig.legend(spec=str(legend_path), position="jTL+o0.2c/0.2c+w6.5c", box="+gwhite+p1p")
 
+        # --- MAXIMUM FLOOD EXTENT LAYER ---
+        elif layer == "MAX-EXTENT":
+            cpt_path = maps_dir / f"max_extent_{unique_id}.cpt"
+            
+            with open(cpt_path, "w") as f:
+                f.write("0 255/255/255@100 1 255/255/255@100\n")
+                f.write("1 0/0/200@0 2 0/0/200@0\n")
+                f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
+
+            fig.grdimage(
+                grid=grd,
+                region=region_padded,
+                projection=projection,
+                cmap=str(cpt_path),
+                frame=["WSne", "xaf", "yaf"],
+                nan_transparent=True,
+                interpolation="n"
+            )
+
+            legend_path = maps_dir / f"max_extent_legend_{unique_id}.txt"
+            with open(legend_path, "w") as f:
+                f.write("H 10p,Helvetica-Bold Maximum Flood Extent\n")
+                f.write("D 0.2c 1p\n")
+                f.write("S 0.3c s 0.4c 0/0/200 0.25p 0.8c Flooded Area\n")
+            
+            fig.legend(spec=str(legend_path), position="jTL+o0.2c/0.2c+w4.5c", box="+gwhite+p1p")
+
         # Add grid image (based on product/layer)
         elif not is_difference and layer in ["WTR", "BWTR", "CONF", "VEG-DIST-STATUS"]:
             
-            # 1. Extract embedded colormap dynamically from the GeoTIFF
+            # Extract embedded colormap dynamically from the GeoTIFF
             cmap_dict = None
             with rasterio.open(mosaic_path) as src:
                 try:
@@ -322,7 +362,7 @@ def make_map(
                 except ValueError:
                     logger.warning(f"No embedded colormap found in {mosaic_path}")
 
-            # 2. Build the CPT on-the-fly directly from the GeoTIFF
+            # Build the CPT on-the-fly directly from the GeoTIFF
             color_palette = str(maps_dir / f"dynamic_cpt_{unique_id}.cpt")
             with open(color_palette, "w") as f:
                 if cmap_dict:
@@ -342,7 +382,7 @@ def make_map(
                     f.write("0 0/0/0@100 256 0/0/0@100\n")
                 f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
 
-            # 3. Draw the Map (interpolation="n" stops the fuzzy "rainbow" edge colors)
+            # Draw the Map
             fig.grdimage(
                 grid=grd,
                 region=region_padded,
@@ -353,13 +393,13 @@ def make_map(
                 interpolation="n"
             )
 
-            # 4. Helper function to extract exact RGB string for the legend
+            # Helper function to extract exact RGB string for the legend
             def get_rgb(v):
                 if cmap_dict and v in cmap_dict:
                     return f"{cmap_dict[v][0]}/{cmap_dict[v][1]}/{cmap_dict[v][2]}"
                 return "255/255/255"
 
-            # 5. Build the corresponding Custom Legend in Upper Right (jTR)
+            # Build the corresponding Custom Legend in Upper Right (jTR)
             legend_path = maps_dir / f"custom_legend_{unique_id}.txt"
             
             if layer == "WTR":
@@ -446,6 +486,7 @@ def make_map(
 
         elif layer == "VEG-ANOM-MAX":
             color_palette = str(palette_dir / "VEG-ANOM-MAX.cpt")
+            
             fig.grdimage(
                 grid=grd,
                 region=region_padded,
@@ -603,6 +644,15 @@ def make_map(
                         nan_transparent=True,
                         interpolation="n"
                     )
+                elif layer == "MAX-EXTENT":
+                    fig.grdimage(
+                        grid=grd,
+                        region=zoom_region,
+                        projection="M5c",
+                        cmap=str(cpt_path),
+                        nan_transparent=True,
+                        interpolation="n"
+                    )
                 elif not is_difference and layer == "VEG-ANOM-MAX":
                     fig.grdimage(
                         grid=grd,
@@ -665,7 +715,7 @@ def make_map(
         # Export map and cleanup
         map_name = maps_dir / f"{short_name}_{layer}_{date_str}{utm_suffix}_map.png"
         fig.savefig(map_name, dpi=900)
-        grd.close()
+        ds.close()
         cleanup_temp_file(mosaic_wgs84)
 
         # Remove all temp CPTs and Legends after all maps are drawn
@@ -676,6 +726,8 @@ def make_map(
             maps_dir / f"categorical_legend_{unique_id}.txt",
             maps_dir / f"dynamic_cpt_{unique_id}.cpt",
             maps_dir / f"custom_legend_{unique_id}.txt",
+            maps_dir / f"max_extent_{unique_id}.cpt",
+            maps_dir / f"max_extent_legend_{unique_id}.txt",
             f"difference_cpt_{unique_id}",
             f"rtc_grayscale_{unique_id}"
         ]:
@@ -763,7 +815,17 @@ def make_layout(
     wrap_width = 50
 
     # Map text elements
-    if short_name == "OPERA_L3_DSWX-S1_V1" and layer != "CONF":
+    if layer == "MAX-EXTENT":
+        product_label = "DSWx-HLS" if "HLS" in short_name else "DSWx-S1"
+        subtitle = f"OPERA Maximum Flood Extent ({product_label})"
+        map_information = (
+            f"This map depicts the cumulative maximum flood extent observed over the specified date range. "
+            f"A pixel is marked as flooded if water was detected in any valid observation during this period. "
+            f"Derived from {short_name} data."
+        )
+        data_source = "Copernicus Harmonized Landsat and Sentinel-2" if "HLS" in short_name else "Copernicus Sentinel-1"
+
+    elif short_name == "OPERA_L3_DSWX-S1_V1" and layer != "CONF":
         subtitle = "OPERA Dynamic Surface Water eXtent from Sentinel-1 (DSWx-S1)"
         map_information = (
             f"The ARIA/OPERA water extent map is derived from an OPERA DSWx-S1 mosaicked "
