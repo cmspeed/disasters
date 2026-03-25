@@ -154,6 +154,12 @@ def make_map(
     else:
         date_str = date
 
+    # Skip if map already exists
+    map_name = maps_dir / f"{short_name}_{layer}_{date_str}{utm_suffix}_map.png"
+    if map_name.exists():
+        logger.info(f"Map image already exists, skipping: {map_name.name}")
+        return map_name
+
     # Create a unique temporary path for the WGS84 reprojected file
     unique_id = uuid.uuid4().hex
     mosaic_wgs84 = Path(str(mosaic_path).replace(".tif", f"_WGS84_TMP_{unique_id}.tif"))
@@ -770,6 +776,12 @@ def make_layout(
         reclassify_snow_ice (bool, optional): Flag indicating if snow/ice reclassification was applied. Defaults to False.
         utm_suffix (str, optional): Suffix string corresponding to the UTM Zone logic.
     """
+    # Skip if layout already exists
+    layout_name = layout_dir / f"{short_name}_{layer}_{date}{utm_suffix}_layout.pdf"
+    if layout_name.exists():
+        logger.info(f"Layout already exists, skipping: {layout_name.name}")
+        return
+    
     # Helper to prettify dates
     def format_display_date(pid):
         # Handle difference format: "YYYYMMDDtHHMM, YYYYMMDDtHHMM"

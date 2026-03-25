@@ -768,26 +768,32 @@ def run_difference_pipeline(
     """
     # Differencing
     t0_diff = time.time()
-    try:
-        if mode == "flood":
-            compute_and_write_difference_positive_change_only(earlier_path, later_path, diff_path)
-            is_diff = True
-        elif mode == "landslide":
-            compute_and_write_difference(earlier_path, later_path, diff_path, nodata_value=None, log=True)
-            is_diff = True
-        else:
+
+    # Skip if diff already exists
+    if diff_path.exists():
+        logger.info(f"Difference map already exists, skipping: {diff_path.name}")
+        is_diff = True
+    else:
+        try:
+            if mode == "flood":
+                compute_and_write_difference_positive_change_only(earlier_path, later_path, diff_path)
+                is_diff = True
+            elif mode == "landslide":
+                compute_and_write_difference(earlier_path, later_path, diff_path, nodata_value=None, log=True)
+                is_diff = True
+            else:
+                return 0.0, 0.0
+        except Exception as e:
+            logger.error(f"Diff computation failed: {e}")
             return 0.0, 0.0
-    except Exception as e:
-        logger.error(f"Diff computation failed: {e}")
-        return 0.0, 0.0
-    t_diff = time.time() - t0_diff
+        t_diff = time.time() - t0_diff
 
     # Plotting (Sequential within this worker, but parallel to main)
     t_plot = run_plotting_task(
         maps_dir, layouts_dir, diff_path, short_name, layer,
         diff_id, diff_date_str, layout_title, bbox, zoom_bbox,
         reclassify_snow_ice, is_diff
-    )
+        )
     return t_diff, t_plot
 
 
@@ -799,12 +805,16 @@ def run_max_extent_pipeline(
     """Computes max flood extent and waits for it to finish before plotting."""
     from .diff import compute_and_write_max_flood_extent
     
-    # Generate the tiff
-    try:
-        compute_and_write_max_flood_extent(input_paths, out_path)
-    except Exception as e:
-        logger.error(f"Max Extent computation failed: {e}")
-        return 0.0, 0.0
+    # Skip if it exists
+    if out_path.exists():
+        logger.info(f"Maximum flood extent already exists, skipping: {out_path.name}")
+    else:
+        # Generate the tiff
+        try:
+            compute_and_write_max_flood_extent(input_paths, out_path)
+        except Exception as e:
+            logger.error(f"Max Extent computation failed: {e}")
+            return 0.0, 0.0
         
     # Plot it after generation is complete
     run_plotting_task(
@@ -828,6 +838,12 @@ def run_rgb_task(vv_path, vh_path, rgb_path) -> float:
         float: Elapsed processing time in seconds.
     """
     t0 = time.time()
+
+    # Skip if already exists
+    if rgb_path.exists():
+        logger.info(f"RGB composite already exists, skipping: {rgb_path.name}")
+        return 0.0
+
     try:
         create_rtc_rgb_visualization(vv_path, vh_path, rgb_path)
         logger.info(f"Successfully generated RGB composite: {rgb_path.name}")
@@ -969,6 +985,27 @@ def generate_products(
 
                         # Use GDAL direct-to-disk mosaicking for RTC products to conserve RAM
                         if short_name == "OPERA_L2_RTC-S1_V1":
+                            mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
+                            mosaic_path = data_dir / mosaic_name
+                            tmp_path = data_dir / f"tmp_{mosaic_name}"
+
+                            # Skip if RTC mosaic already exists
+                            if mosaic_path.exists():
+                                logger.info(f"Mosaic already exists, skipping: {mosaic_name}")
+                                with rasterio.open(mosaic_path) as ds:
+                                    mosaic_crs = ds.crs
+                                # Register it for differencing later!
+                                mosaic_index[short_name][layer][pass_id] = {"path": mosaic_path, "crs": mosaic_crs}
+                                
+                                if mode != "rtc-rgb":
+                                    future = executor.submit(
+                                        run_plotting_task, maps_dir, layouts_dir, mosaic_path, short_name, layer,
+                                        pass_id, layout_date, layout_title, bbox, zoom_bbox,
+                                        reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
+                                    )
+                                    plotting_futures.append(future)
+                                continue
+
                             logger.info("Using GDAL direct-to-disk mosaicking for RTC to conserve RAM.")
                             
                             gdal.PushErrorHandler('CPLQuietErrorHandler')
@@ -981,10 +1018,6 @@ def generate_products(
                             max_x = min_x + (transform.a * width)
                             min_y = max_y + (transform.e * height)
                             output_bounds = [min_x, min_y, max_x, max_y]
-
-                            mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
-                            mosaic_path = data_dir / mosaic_name
-                            tmp_path = data_dir / f"tmp_{mosaic_name}"
 
                             # Open datasets to avoid GDALDatasetShadow errors
                             opened_datasets = []
@@ -1057,6 +1090,40 @@ def generate_products(
                             continue # Skip the xarray processing loops entirely for RTC
 
                         # For non-RTC products, we load the granules into xarray DataArrays for filtering and mosaicking
+                        mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
+                        mosaic_path = data_dir / mosaic_name
+                        tmp_path = data_dir / f"tmp_{mosaic_name}"
+                        conf_name = f"{short_name}_CONF_{pass_id}_mosaic.tif"
+                        conf_path = data_dir / conf_name
+                        conf_tmp = data_dir / f"tmp_{conf_name}"
+                        
+                        conf_column = "Download URL CONF" if mode == "flood" else "Download URL VEG-DIST-CONF"
+                        has_conf = conf_column in cluster_df.columns and not cluster_df[conf_column].dropna().empty
+                        needs_conf = (mode == "flood" and layer == "WTR" and has_conf)
+
+                        if mosaic_path.exists() and (not needs_conf or conf_path.exists()):
+                            logger.info(f"Mosaic already exists, skipping: {mosaic_name}")
+                            with rasterio.open(mosaic_path) as ds:
+                                mosaic_crs = ds.crs
+                            
+                            mosaic_index[short_name][layer][pass_id] = {"path": mosaic_path, "crs": mosaic_crs}
+                            
+                            future = executor.submit(
+                                run_plotting_task, maps_dir, layouts_dir, mosaic_path, short_name, layer,
+                                pass_id, layout_date, layout_title, bbox, zoom_bbox,
+                                reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
+                            )
+                            plotting_futures.append(future)
+                            
+                            if needs_conf:
+                                future = executor.submit(
+                                    run_plotting_task, maps_dir, layouts_dir, conf_path, short_name, "CONF",
+                                    pass_id, layout_date, layout_title, bbox, zoom_bbox,
+                                    False, False, benchmark_mode=(benchmark_stats is not None)
+                                )
+                                plotting_futures.append(future)
+                            continue
+
                         DS, conf_DS, date_DS = None, None, None
                         conf_colormap = None
 
@@ -1215,11 +1282,6 @@ def generate_products(
 
                         image = array_to_image(mosaic, colormap=colormap, nodata=nodata)
                         
-                        # Create filename and full paths using pass_id (YYYYMMDDtHHMM)
-                        mosaic_name = f"{short_name}_{layer}_{pass_id}_mosaic.tif"
-                        mosaic_path = data_dir / mosaic_name
-                        tmp_path = data_dir / f"tmp_{mosaic_name}"
-
                         # Save the mosaic to a temporary GeoTIFF
                         copy(image, tmp_path, driver="GTiff")
                         warp_args = {"xRes": 30, "yRes": 30, "creationOptions": ["COMPRESS=DEFLATE"]}
@@ -1255,9 +1317,6 @@ def generate_products(
                         # Save and plot the perfectly synced CONF layer if we generated it
                         if conf_mosaic is not None:
                             conf_image = array_to_image(conf_mosaic, colormap=conf_colormap, nodata=255)
-                            conf_name = f"{short_name}_CONF_{pass_id}_mosaic.tif"
-                            conf_path = data_dir / conf_name
-                            conf_tmp = data_dir / f"tmp_{conf_name}"
                             
                             copy(conf_image, conf_tmp, driver="GTiff")
                             gdal.Warp(str(conf_path), str(conf_tmp), **warp_args)
@@ -1317,7 +1376,9 @@ def generate_products(
                 if mode == "landslide" and short_name_k != "OPERA_L2_RTC-S1_V1": continue
                 
                 for layer_k, date_map in layers_dict.items():
-                    # dates is now a list of sorted pass_ids (YYYYMMDDtHHMM)
+                    # Only generate water gain for WTR
+                    if mode == "flood" and layer_k != "WTR": 
+                        continue
                     dates = sorted(date_map.keys())
                     
                     for i in range(len(dates)):
