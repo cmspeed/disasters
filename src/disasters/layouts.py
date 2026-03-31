@@ -93,7 +93,8 @@ def make_map(
     bbox: list,
     zoom_bbox: list = None,
     is_difference: bool = False,
-    utm_suffix: str = ""
+    utm_suffix: str = "",
+    skip_existing: bool = False
 ) -> Path:
     """
     Create a map using PyGMT from the provided mosaic path.
@@ -108,6 +109,7 @@ def make_map(
         zoom_bbox (list, optional): Bounding box for the zoom-in inset map, in the form [South, North, West, East].
         is_difference (bool, optional): Flag to indicate if the mosaic is a difference product. Defaults to False.
         utm_suffix (str, optional): Suffix string corresponding to the UTM Zone logic.
+        skip_existing (bool, optional): If True, skip map creation if the map image already exists. Defaults to False.
 
     Returns:
         map_name (Path): Path to the saved map image.
@@ -156,7 +158,7 @@ def make_map(
 
     # Skip if map already exists
     map_name = maps_dir / f"{short_name}_{layer}_{date_str}{utm_suffix}_map.png"
-    if map_name.exists():
+    if skip_existing and map_name.exists():
         logger.info(f"Map image already exists, skipping: {map_name.name}")
         return map_name
 
@@ -760,7 +762,8 @@ def make_layout(
     layout_date: str,
     layout_title: str,
     reclassify_snow_ice: bool = False,
-    utm_suffix: str = ""
+    utm_suffix: str = "",
+    skip_existing: bool = False
 ) -> None:
     """
     Create a layout using matplotlib for the provided map.
@@ -775,10 +778,11 @@ def make_layout(
         layout_title (str): Title for the layout.
         reclassify_snow_ice (bool, optional): Flag indicating if snow/ice reclassification was applied. Defaults to False.
         utm_suffix (str, optional): Suffix string corresponding to the UTM Zone logic.
+        skip_existing (bool, optional): If True, skip layout creation if it already exists. Defaults to False.
     """
     # Skip if layout already exists
     layout_name = layout_dir / f"{short_name}_{layer}_{date}{utm_suffix}_layout.pdf"
-    if layout_name.exists():
+    if skip_existing and layout_name.exists():
         logger.info(f"Layout already exists, skipping: {layout_name.name}")
         return
     

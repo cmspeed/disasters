@@ -74,6 +74,7 @@ class PipelineConfig:
     benchmark: bool = False
     no_mask: bool = False
     compute_cloudiness: bool = False
+    skip_existing: bool = False
 
 
 def get_local_spatial_properties(df_opera: pd.DataFrame) -> tuple[list[float], str]:
@@ -236,7 +237,8 @@ def run_pipeline(config: PipelineConfig) -> Path | None:
         benchmark_stats=benchmark_stats,
         username=username,
         password=password,
-        no_mask=config.no_mask
+        no_mask=config.no_mask,
+        skip_existing=config.skip_existing
     )
 
     if config.benchmark and benchmark_stats:
@@ -698,7 +700,7 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
 def run_plotting_task(
     maps_dir, layouts_dir, mosaic_path, short_name, layer, 
     date_id, layout_date, layout_title, bbox, zoom_bbox, 
-    reclassify_snow_ice, is_difference, benchmark_mode=False
+    reclassify_snow_ice, is_difference, skip_existing, benchmark_mode=False
 ) -> float:
     """
     Wrapper function to run map and layout generation in a separate process.
@@ -716,21 +718,25 @@ def run_plotting_task(
         zoom_bbox (list[float] | None): Inset boundary box coordinates for zooming.
         reclassify_snow_ice (bool): Reclassification flag.
         is_difference (bool): Flag indicating if this is a diff map.
+        skip_existing (bool): Whether to skip plotting if output already exists.
         benchmark_mode (bool): Toggle for benchmark timings.
 
     Returns:
         float: Elapsed time if successful, 0.0 otherwise.
     """
+
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    
     t0 = time.time()
     try:
         map_name = make_map(
             maps_dir, mosaic_path, short_name, layer, date_id, 
-            bbox, zoom_bbox, is_difference
+            bbox, zoom_bbox, is_difference, skip_existing=skip_existing
         )
         if map_name:
             make_layout(
                 layouts_dir, map_name, short_name, layer, 
-                date_id, layout_date, layout_title, reclassify_snow_ice
+                date_id, layout_date, layout_title, reclassify_snow_ice, skip_existing=skip_existing
             )
         return time.time() - t0
     except Exception as e:
@@ -742,7 +748,7 @@ def run_difference_pipeline(
     earlier_path, later_path, diff_path, mode,
     maps_dir, layouts_dir, short_name, layer,
     diff_id, diff_date_str, layout_title, bbox, zoom_bbox,
-    reclassify_snow_ice
+    reclassify_snow_ice, skip_existing
 ) -> tuple:
     """
     Combined task pipeline computing difference maps and plotting the layouts.
@@ -762,15 +768,19 @@ def run_difference_pipeline(
         bbox (list[float]): Coordinate bounds for visualization.
         zoom_bbox (list[float] | None): Optional zoomed inset map bounds.
         reclassify_snow_ice (bool): Rule flag indicating snow/ice processing.
+        skip_existing (bool): Whether to skip processing if outputs already exist.
 
     Returns:
         tuple: (diff_time, plot_time) floating point times in seconds.
     """
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
     # Differencing
     t0_diff = time.time()
+    t_diff = 0.0
 
     # Skip if diff already exists
-    if diff_path.exists():
+    if skip_existing and diff_path.exists():
         logger.info(f"Difference map already exists, skipping: {diff_path.name}")
         is_diff = True
     else:
@@ -792,7 +802,7 @@ def run_difference_pipeline(
     t_plot = run_plotting_task(
         maps_dir, layouts_dir, diff_path, short_name, layer,
         diff_id, diff_date_str, layout_title, bbox, zoom_bbox,
-        reclassify_snow_ice, is_diff
+        reclassify_snow_ice, is_diff, skip_existing=skip_existing
         )
     return t_diff, t_plot
 
@@ -800,13 +810,34 @@ def run_difference_pipeline(
 def run_max_extent_pipeline(
     input_paths, out_path, maps_dir, layouts_dir, short_name, layer,
     diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
-    reclassify_snow_ice
+    reclassify_snow_ice, skip_existing
 ) -> tuple:
-    """Computes max flood extent and waits for it to finish before plotting."""
+    """Computes max flood extent and waits for it to finish before plotting.
+    
+    Args:
+        input_paths (list[Path]): List of filepaths to all mosaics to be included in the max extent calculation.
+        out_path (Path): Destination filepath for the calculated max extent map.
+        maps_dir (Path): Output directory for the raw maps.
+        layouts_dir (Path): Output directory for formatted layouts.
+        short_name (str): The product short name.
+        layer (str): The specific layer being processed.
+        diff_id_str (str): Identifier joining the compared dates.
+        diff_date_str_layout (str): Date string to be displayed in layout.
+        layout_title (str): Primary layout map title.
+        bbox (list[float]): Coordinate bounds for visualization.
+        zoom_bbox (list[float] | None): Optional zoomed inset map bounds.
+        reclassify_snow_ice (bool): Rule flag indicating snow/ice reclassification.
+        skip_existing (bool): Whether to skip processing if outputs already exist.
+
+    Returns:
+        tuple: (diff_time, plot_time) floating point times in seconds. Max extent calculation time is included in diff_time.
+    """
     from .diff import compute_and_write_max_flood_extent
     
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
     # Skip if it exists
-    if out_path.exists():
+    if skip_existing and out_path.exists():
         logger.info(f"Maximum flood extent already exists, skipping: {out_path.name}")
     else:
         # Generate the tiff
@@ -820,12 +851,12 @@ def run_max_extent_pipeline(
     run_plotting_task(
         maps_dir, layouts_dir, out_path, short_name, layer,
         diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
-        reclassify_snow_ice, False
+        reclassify_snow_ice, is_difference = False, skip_existing=skip_existing
     )
     return 0.0, 0.0
 
 
-def run_rgb_task(vv_path, vh_path, rgb_path) -> float:
+def run_rgb_task(vv_path, vh_path, rgb_path, skip_existing) -> float:
     """
     Wrapper function to execute RTC RGB composite visualizations and catch exceptions.
 
@@ -833,14 +864,18 @@ def run_rgb_task(vv_path, vh_path, rgb_path) -> float:
         vv_path (Path): Source path to the VV Float32 mosaic.
         vh_path (Path): Source path to the VH Float32 mosaic.
         rgb_path (Path): Output destination for the calculated RGB GeoTIFF.
+        skip_existing (bool): Whether to skip processing if the RGB composite already exists.
 
     Returns:
         float: Elapsed processing time in seconds.
     """
+
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    
     t0 = time.time()
 
     # Skip if already exists
-    if rgb_path.exists():
+    if skip_existing and rgb_path.exists():
         logger.info(f"RGB composite already exists, skipping: {rgb_path.name}")
         return 0.0
 
@@ -855,7 +890,8 @@ def run_rgb_task(vv_path, vh_path, rgb_path) -> float:
 def generate_products(
     df_opera, mode, mode_dir: Path, layout_title: str, bbox: list[float], zoom_bbox: list[float] | None,
     filter_date: str | None = None, reclassify_snow_ice: bool = False, slope_threshold: int | None = None,
-    benchmark_stats: dict | None = None, username: str | None = None, password: str | None = None, no_mask: bool = False
+    benchmark_stats: dict | None = None, username: str | None = None, password: str | None = None,
+    no_mask: bool = False, skip_existing: bool = False
 ) -> None:
     """
     Generate mosaicked products, maps, and layouts based on the provided DataFrame and mode. 
@@ -875,6 +911,7 @@ def generate_products(
         username (str | None): Earthdata auth credentials.
         password (str | None): Earthdata auth credentials.
         no_mask (bool): If True, skips coastal masking step.
+        skip_existing (bool): If True, skips processing steps for outputs that already exist.
 
     Returns:
         None
@@ -990,7 +1027,7 @@ def generate_products(
                             tmp_path = data_dir / f"tmp_{mosaic_name}"
 
                             # Skip if RTC mosaic already exists
-                            if mosaic_path.exists():
+                            if skip_existing and mosaic_path.exists():
                                 logger.info(f"Mosaic already exists, skipping: {mosaic_name}")
                                 with rasterio.open(mosaic_path) as ds:
                                     mosaic_crs = ds.crs
@@ -1001,7 +1038,8 @@ def generate_products(
                                     future = executor.submit(
                                         run_plotting_task, maps_dir, layouts_dir, mosaic_path, short_name, layer,
                                         pass_id, layout_date, layout_title, bbox, zoom_bbox,
-                                        reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
+                                        reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None),
+                                        skip_existing=skip_existing
                                     )
                                     plotting_futures.append(future)
                                 continue
@@ -1083,7 +1121,8 @@ def generate_products(
                                     run_plotting_task,
                                     maps_dir, layouts_dir, mosaic_path, short_name, layer,
                                     pass_id, layout_date, layout_title, bbox, zoom_bbox,
-                                    reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
+                                    reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None),
+                                    skip_existing=skip_existing
                                 )
                                 plotting_futures.append(future)
 
@@ -1101,7 +1140,7 @@ def generate_products(
                         has_conf = conf_column in cluster_df.columns and not cluster_df[conf_column].dropna().empty
                         needs_conf = (mode == "flood" and layer == "WTR" and has_conf)
 
-                        if mosaic_path.exists() and (not needs_conf or conf_path.exists()):
+                        if skip_existing and mosaic_path.exists() and (not needs_conf or conf_path.exists()):
                             logger.info(f"Mosaic already exists, skipping: {mosaic_name}")
                             with rasterio.open(mosaic_path) as ds:
                                 mosaic_crs = ds.crs
@@ -1111,7 +1150,8 @@ def generate_products(
                             future = executor.submit(
                                 run_plotting_task, maps_dir, layouts_dir, mosaic_path, short_name, layer,
                                 pass_id, layout_date, layout_title, bbox, zoom_bbox,
-                                reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
+                                reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None),
+                                skip_existing=skip_existing
                             )
                             plotting_futures.append(future)
                             
@@ -1119,7 +1159,8 @@ def generate_products(
                                 future = executor.submit(
                                     run_plotting_task, maps_dir, layouts_dir, conf_path, short_name, "CONF",
                                     pass_id, layout_date, layout_title, bbox, zoom_bbox,
-                                    False, False, benchmark_mode=(benchmark_stats is not None)
+                                    False, False, benchmark_mode=(benchmark_stats is not None),
+                                    skip_existing=skip_existing
                                 )
                                 plotting_futures.append(future)
                             continue
@@ -1310,7 +1351,8 @@ def generate_products(
                                 run_plotting_task,
                                 maps_dir, layouts_dir, mosaic_path, short_name, layer,
                                 pass_id, layout_date, layout_title, bbox, zoom_bbox,
-                                reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None)
+                                reclassify_snow_ice, False, benchmark_mode=(benchmark_stats is not None),
+                                skip_existing=skip_existing
                             )
                             plotting_futures.append(future)
 
@@ -1330,7 +1372,8 @@ def generate_products(
                                     run_plotting_task,
                                     maps_dir, layouts_dir, conf_path, short_name, "CONF",
                                     pass_id, layout_date, layout_title, bbox, zoom_bbox,
-                                    False, False, benchmark_mode=(benchmark_stats is not None)
+                                    False, False, benchmark_mode=(benchmark_stats is not None),
+                                    skip_existing=skip_existing
                                 )
                                 plotting_futures.append(future)
 
@@ -1364,7 +1407,7 @@ def generate_products(
                     # Correctly submit the wrapper task instead of the core generation function
                     future = executor.submit(
                         run_rgb_task, 
-                        vv_path, vh_path, rgb_path
+                        vv_path, vh_path, rgb_path, skip_existing=skip_existing
                     )
                     plotting_futures.append(future)
 
@@ -1406,7 +1449,7 @@ def generate_products(
                                 early_info["path"], later_info["path"], diff_path, mode,
                                 maps_dir, layouts_dir, short_name_k, layer_k,
                                 diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
-                                reclassify_snow_ice
+                                reclassify_snow_ice, skip_existing=skip_existing
                             )
                             differencing_futures.append(future)
         
@@ -1440,7 +1483,7 @@ def generate_products(
                     input_paths, out_path,
                     maps_dir, layouts_dir, short_name_k, "MAX-EXTENT",
                     diff_id_str, diff_date_str_layout, layout_title, bbox, zoom_bbox,
-                    reclassify_snow_ice
+                    reclassify_snow_ice, skip_existing=skip_existing
                 )
                 differencing_futures.append(future)
     finally:
