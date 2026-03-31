@@ -208,6 +208,7 @@ If `-b` is omitted, the command computes the geographic union of the local input
 | `--no-mask` | No | Skips the global coastal masking step |
 | `-c`, `--compute_cloudiness` | No | Flag to enable HLS cloud cover calculation during the search step. |
 | `-zb`, `--zoom_bbox`  | No       | Optional inset extent for `run`, as `South North West East`. Must be enclosed in quotes.|
+| `--skip-existing`  | No      | Optional feature to skip the generation of geotiffs, difference maps, or layouts that already exist in the output directory. Default is `False`. |
 
 ### Disaster Modes
 
