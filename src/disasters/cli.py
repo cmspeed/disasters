@@ -179,6 +179,12 @@ def cli() -> None:
     default=False,
     help="Enable HLS cloud cover calculation. This may significantly increase runtime, especially for large AOIs or wide date ranges."
 )
+@click.option(
+    "-se", "--skip-existing",
+    is_flag=True,
+    default=False,
+    help="Skip generation of files that already exist in the output directory.",
+)
 
 def run(
     bbox: str,
@@ -197,7 +203,8 @@ def run(
     slope_threshold: Optional[int],
     benchmark: bool,
     no_mask: bool,
-    compute_cloudiness: bool
+    compute_cloudiness: bool,
+    skip_existing: bool
 ) -> None:
     """Run the disaster pipeline (end-to-end)."""
     # Ensure slope values are between 0 and 100 degrees, if provided
@@ -246,7 +253,8 @@ def run(
         slope_threshold=slope_threshold,
         benchmark=benchmark,
         no_mask=no_mask,
-        compute_cloudiness=compute_cloudiness
+        compute_cloudiness=compute_cloudiness,
+        skip_existing=skip_existing
     )
 
     mode_dir = run_pipeline(cfg)
