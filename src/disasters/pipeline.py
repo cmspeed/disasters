@@ -1347,7 +1347,7 @@ def generate_products(
                                         try:
                                             grid_props = master_grid.copy()
                                             dst_crs_val = grid_props.pop("dst_crs")
-                                            da_w = da_dswx.rio.reproject(dst_crs_val, **grid_props, resampling=resampling_method)
+                                            da_w = da_dswx.rio.reproject(dst_crs_val, **grid_props, resampling=Resampling.nearest)
                                             dswx_warped.append(da_w)
                                         except Exception as e:
                                             logger.warning(f"Failed to reproject DSWx granule for masking: {e}")
