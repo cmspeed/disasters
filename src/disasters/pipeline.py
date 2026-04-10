@@ -1321,6 +1321,73 @@ def generate_products(
                             else:
                                 logger.warning("Coastal mask shape mismatches mosaic. Skipping coastal filter.")
 
+                        # Mask DIST-HLS by corresponding DSWx-HLS to remove water-related disturbance (e.g., water banklines)
+                        if mode == "landslide" and short_name == "OPERA_L3_DIST-ALERT-HLS_V1":
+                            if slope_threshold is not None:
+                                # Find DSWx-HLS WTR granules for the same datetime
+                                dswx_rows = df_opera[(df_opera["Dataset"] == "OPERA_L3_DSWX-HLS_V1") & (df_opera["Start Date"] == date)]
+                                
+                                if "Download URL WTR" in dswx_rows.columns:
+                                    dswx_urls = dswx_rows["Download URL WTR"].dropna().tolist()
+                                else:
+                                    dswx_urls = []
+                                
+                                if dswx_urls:
+                                    logger.info(f"[Water Mask] Generating concurrent DSWx-HLS water mask for {date} to filter water-related disturbance...")
+                                    
+                                    # Load DSWx granules into xarray
+                                    dswx_ds_list = compile_and_load_data(
+                                        dswx_urls, mode="other", benchmark_stats=benchmark_stats, username=username, password=password
+                                    )
+                                    
+                                    if dswx_ds_list:
+                                        dswx_warped = []
+                                        # Reproject to master grid
+                                        for da_dswx in dswx_ds_list:
+                                            try:
+                                                grid_props = master_grid.copy()
+                                                dst_crs_val = grid_props.pop("dst_crs")
+                                                da_w = da_dswx.rio.reproject(dst_crs_val, **grid_props, resampling=Resampling.nearest)
+                                                dswx_warped.append(da_w)
+                                            except Exception as e:
+                                                logger.warning(f"[Water Mask] Failed to reproject DSWx granule: {e}")
+                                        
+                                        if dswx_warped:
+                                            # Apply OPERA pixel-priority rules
+                                            dswx_mosaic, _, _ = mosaic_opera(dswx_warped, product="OPERA_L3_DSWX-HLS_V1", merge_args={})
+                                            
+                                            # Extract the numpy array
+                                            water_arr = dswx_mosaic.squeeze().values
+                                            
+                                            # Identify Water (1) and Partial Water (2)
+                                            is_water = (water_arr == 1) | (water_arr == 2) | (water_arr == 252)
+                                            
+                                            # Apply the mask to the DIST mosaic
+                                            if mosaic.shape[-2:] == is_water.shape:
+                                                mosaic.values[..., is_water] = nodata
+                                                if conf_mosaic is not None:
+                                                    conf_mosaic.values[..., is_water] = 255
+                                                logger.info(f"[Water Mask] Success: Removed {np.sum(is_water)} water-related disturbance pixels.")
+                                            else:
+                                                logger.warning(f"[Water Mask] Shape {is_water.shape} mismatches mosaic {mosaic.shape[-2:]}. Skipping.")
+                                            
+                                            # Clean up the mosaic array
+                                            dswx_mosaic.close()
+                                            del dswx_mosaic
+                                        
+                                        # Close all DSWx arrays
+                                        for da_dswx in dswx_warped: da_dswx.close()
+                                        for da_dswx in dswx_ds_list: da_dswx.close()
+                                        del dswx_warped
+                                        del dswx_ds_list
+                                        
+                                        import gc
+                                        gc.collect()
+                                else:
+                                    logger.warning(f"[Water Mask] No DSWx-HLS WTR granules found for {date}. Skipping water-related disturbance filtering.")
+                            else:
+                                logger.info("[Water Mask] No slope threshold (-st) specified. Skipping water-related disturbance filtering.")
+
                         image = array_to_image(mosaic, colormap=colormap, nodata=nodata)
                         
                         # Save the mosaic to a temporary GeoTIFF
