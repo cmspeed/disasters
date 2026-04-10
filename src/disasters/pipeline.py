@@ -24,7 +24,7 @@ from rasterio.warp import transform_bounds
 
 # Local/Relative Imports
 from .auth import authenticate
-from .catalog import cluster_by_time, read_opera_metadata
+from .catalog import cluster_by_time, read_opera_metadata, get_S1_orbit_direction
 from .diff import (
     compute_and_write_difference,
     compute_and_write_difference_positive_change_only,
@@ -1010,10 +1010,17 @@ def generate_products(
                         # Determine unique PassID from the earliest time in the cluster
                         # Format: YYYYMMDDtHHMM (e.g., 20241010t0019)
                         start_time_min = cluster_df["Start Time"].min()
-                        pass_id = start_time_min.strftime("%Y%m%dT%H%M")
+                        raw_pass_id = start_time_min.strftime("%Y%m%dT%H%M")
                         
                         urls = cluster_df[url_column].dropna().tolist()
                         if not urls: continue
+
+                        # Extract S1 orbit direction for S1 ---
+                        flight_dir = ""
+                        if "S1" in short_name:
+                            flight_dir = get_S1_orbit_direction(urls, username, password)
+
+                        pass_id = f"{raw_pass_id}{flight_dir}"
 
                         logger.info(f"Processing {short_name} - {layer} for pass {pass_id} (Date: {date})")
                         logger.info(f"Found {len(urls)} URLs for this pass")
@@ -1032,7 +1039,11 @@ def generate_products(
                                 with rasterio.open(mosaic_path) as ds:
                                     mosaic_crs = ds.crs
                                 # Register it for differencing later!
-                                mosaic_index[short_name][layer][pass_id] = {"path": mosaic_path, "crs": mosaic_crs}
+                                mosaic_index[short_name][layer][pass_id] = {
+                                    "path": mosaic_path,
+                                    "crs": mosaic_crs,
+                                    "flight_dir": flight_dir
+                                    }
                                 
                                 if mode != "rtc-rgb":
                                     future = executor.submit(
@@ -1112,7 +1123,8 @@ def generate_products(
                             # Register to index for downstream differencing
                             mosaic_index[short_name][layer][pass_id] = {
                                 "path": mosaic_path,
-                                "crs": master_grid["dst_crs"]
+                                "crs": master_grid["dst_crs"],
+                                "flight_dir": flight_dir
                             }
 
                             # Submit Plotting Task (Skip individual layouts for rtc-rgb mode)
@@ -1145,7 +1157,10 @@ def generate_products(
                             with rasterio.open(mosaic_path) as ds:
                                 mosaic_crs = ds.crs
                             
-                            mosaic_index[short_name][layer][pass_id] = {"path": mosaic_path, "crs": mosaic_crs}
+                            mosaic_index[short_name][layer][pass_id] = {
+                                "path": mosaic_path,
+                                "crs": mosaic_crs,
+                                "flight_dir": flight_dir}
                             
                             future = executor.submit(
                                 run_plotting_task, maps_dir, layouts_dir, mosaic_path, short_name, layer,
@@ -1408,7 +1423,9 @@ def generate_products(
 
                         # Add info to the mosiac index for pair-wise differencing
                         mosaic_index[short_name][layer][pass_id] = {
-                            "path": mosaic_path, "crs": mosaic_crs
+                            "path": mosaic_path,
+                            "crs": mosaic_crs,
+                            "flight_dir": flight_dir
                         }
 
                         # --- Background Plotting ---
@@ -1502,7 +1519,7 @@ def generate_products(
                             if early_info["crs"] != later_info["crs"]:
                                 continue
 
-                            # Setup filenames and paths
+                            # Setup filenames and paths (d_early and d_later already contain A/D!)
                             suffix = "water_gain.tif" if mode == "flood" else "log-diff.tif"
                             diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_{suffix}"
                             diff_path = data_dir / diff_name
@@ -1539,11 +1556,15 @@ def generate_products(
                 
                 earliest_date = pass_ids[0]
                 latest_date = pass_ids[-1]
-                out_name = f"{short_name_k}_WTR_{earliest_date}_{latest_date}_max_extent.tif"
+
+                earliest_clean = earliest_date[:-1] if earliest_date[-1].isalpha() else earliest_date
+                latest_clean = latest_date[:-1] if latest_date[-1].isalpha() else latest_date
+
+                out_name = f"{short_name_k}_WTR_{earliest_clean}_{latest_clean}_max_extent.tif"
                 out_path = data_dir / out_name
 
-                diff_id_str = f"{earliest_date}_{latest_date}"
-                diff_date_str_layout = f"{earliest_date}, {latest_date}"
+                diff_id_str = f"{earliest_clean}_{latest_clean}"
+                diff_date_str_layout = f"{earliest_clean}, {latest_clean}"
                 
                 future = executor.submit(
                     run_max_extent_pipeline,

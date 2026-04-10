@@ -120,3 +120,33 @@ def cluster_by_time(df: pd.DataFrame, time_col: str = "Start Time", threshold_mi
         groups.append(pd.DataFrame(current_group))
         
     return groups
+
+
+def get_S1_orbit_direction(urls: list, username: str = None, password: str = None) -> str:
+    """
+    Reads metadata of the first available OPERA DSWx-S1 URL to extract the orbit pass direction.
+    Returns 'A' for ascending, 'D' for descending, or '' if not found.
+    """
+    if not urls: return ""
+    
+    from opera_utils.disp._remote import open_file
+    import rasterio
+    
+    url = urls[0]
+    try:
+        if url.startswith("http") and not url.startswith("/vsi"):
+            f = open_file(url, earthdata_username=username, earthdata_password=password)
+            with rasterio.open(f) as ds:
+                tags = ds.tags()
+        else:
+            with rasterio.open(url) as ds:
+                tags = ds.tags()
+                
+        direction = tags.get("RTC_ORBIT_PASS_DIRECTION", tags.get("ORBIT_PASS_DIRECTION", "")).lower()
+        
+        if "ascending" in direction: return "A"
+        if "descending" in direction: return "D"
+    except Exception as e:
+        logger.warning(f"Failed to read flight direction from {url}: {e}")
+        
+    return ""
