@@ -1558,20 +1558,14 @@ def generate_products(
                 
                 input_paths = [date_map[pid]["path"] for pid in pass_ids]
                 
-                # Append orbit direction to the diff name for S1 products to distinguish A/D pairs
                 earliest_date = pass_ids[0]
-                dir_early = date_map[earliest_date].get("flight_dir", "")
-                d_early_str = f"{earliest_date}{dir_early}"
-                
                 latest_date = pass_ids[-1]
-                dir_later = date_map[latest_date].get("flight_dir", "")
-                d_later_str = f"{latest_date}{dir_later}"
 
-                out_name = f"{short_name_k}_WTR_{d_early_str}_{d_later_str}_max_extent.tif"
+                out_name = f"{short_name_k}_WTR_{earliest_date}_{latest_date}_max_extent.tif"
                 out_path = data_dir / out_name
 
-                diff_id_str = f"{d_early_str}_{d_later_str}"
-                diff_date_str_layout = f"{d_early_str}, {d_later_str}"
+                diff_id_str = f"{earliest_date}_{latest_date}"
+                diff_date_str_layout = f"{earliest_date}, {latest_date}"
                 
                 future = executor.submit(
                     run_max_extent_pipeline,
