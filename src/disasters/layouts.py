@@ -227,6 +227,7 @@ def make_map(
                 data_values = grd.values[~np.isnan(grd.values)]
                 if len(data_values) == 0:
                     logger.warning(f"No valid data in {mosaic_path}")
+                    ds.close()
                     cleanup_temp_file(mosaic_wgs84)
                     return None
 
