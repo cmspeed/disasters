@@ -785,16 +785,22 @@ def make_layout(
     if skip_existing and layout_name.exists():
         logger.info(f"Layout already exists, skipping: {layout_name.name}")
         return
-    
+
     # Helper to prettify dates
     def format_display_date(pid):
         # Handle difference format: "YYYYMMDDtHHMM, YYYYMMDDtHHMM"
         if ',' in pid:
              parts = pid.split(',')
              return f"{format_display_date(parts[0].strip())}, {format_display_date(parts[1].strip())}"
-        # Handle single PassID YYYYMMDDtHHMM
-        if re.match(r"\d{8}t\d{4}", pid):
-             return f"{pid[:4]}-{pid[4:6]}-{pid[6:8]} {pid[9:11]}:{pid[11:13]}"
+        
+        # Regex to capture optional trailing letter (A/D)
+        match = re.match(r"(\d{8}t\d{4})([A-Z]?)", pid)
+        if match:
+             dt_part = match.group(1)
+             dir_part = match.group(2)
+             formatted = f"{dt_part[:4]}-{dt_part[4:6]}-{dt_part[6:8]} {dt_part[9:11]}:{dt_part[11:13]}"
+             return f"{formatted} ({dir_part})" if dir_part else formatted
+             
         return pid
 
     # Create blank figure

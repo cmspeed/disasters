@@ -24,7 +24,7 @@ from rasterio.warp import transform_bounds
 
 # Local/Relative Imports
 from .auth import authenticate
-from .catalog import cluster_by_time, read_opera_metadata
+from .catalog import cluster_by_time, read_opera_metadata, get_S1_orbit_direction
 from .diff import (
     compute_and_write_difference,
     compute_and_write_difference_positive_change_only,
@@ -1015,6 +1015,11 @@ def generate_products(
                         urls = cluster_df[url_column].dropna().tolist()
                         if not urls: continue
 
+                        # Extract S1 orbit direction for S1 ---
+                        flight_dir = ""
+                        if "S1" in short_name:
+                            flight_dir = get_S1_orbit_direction(urls, username, password)
+
                         logger.info(f"Processing {short_name} - {layer} for pass {pass_id} (Date: {date})")
                         logger.info(f"Found {len(urls)} URLs for this pass")
                         
@@ -1032,7 +1037,11 @@ def generate_products(
                                 with rasterio.open(mosaic_path) as ds:
                                     mosaic_crs = ds.crs
                                 # Register it for differencing later!
-                                mosaic_index[short_name][layer][pass_id] = {"path": mosaic_path, "crs": mosaic_crs}
+                                mosaic_index[short_name][layer][pass_id] = {
+                                    "path": mosaic_path,
+                                    "crs": mosaic_crs,
+                                    "flight_dir": flight_dir
+                                    }
                                 
                                 if mode != "rtc-rgb":
                                     future = executor.submit(
@@ -1112,7 +1121,8 @@ def generate_products(
                             # Register to index for downstream differencing
                             mosaic_index[short_name][layer][pass_id] = {
                                 "path": mosaic_path,
-                                "crs": master_grid["dst_crs"]
+                                "crs": master_grid["dst_crs"],
+                                "flight_dir": flight_dir
                             }
 
                             # Submit Plotting Task (Skip individual layouts for rtc-rgb mode)
@@ -1145,7 +1155,10 @@ def generate_products(
                             with rasterio.open(mosaic_path) as ds:
                                 mosaic_crs = ds.crs
                             
-                            mosaic_index[short_name][layer][pass_id] = {"path": mosaic_path, "crs": mosaic_crs}
+                            mosaic_index[short_name][layer][pass_id] = {
+                                "path": mosaic_path,
+                                "crs": mosaic_crs,
+                                "flight_dir": flight_dir}
                             
                             future = executor.submit(
                                 run_plotting_task, maps_dir, layouts_dir, mosaic_path, short_name, layer,
@@ -1408,7 +1421,9 @@ def generate_products(
 
                         # Add info to the mosiac index for pair-wise differencing
                         mosaic_index[short_name][layer][pass_id] = {
-                            "path": mosaic_path, "crs": mosaic_crs
+                            "path": mosaic_path,
+                            "crs": mosaic_crs,
+                            "flight_dir": flight_dir
                         }
 
                         # --- Background Plotting ---
@@ -1502,13 +1517,19 @@ def generate_products(
                             if early_info["crs"] != later_info["crs"]:
                                 continue
 
+                            # Append orbit direction to the diff name for S1 products to distinguish A/D pairs
+                            dir_early = early_info.get("flight_dir", "")
+                            dir_later = later_info.get("flight_dir", "")
+                            d_early_str = f"{d_early}{dir_early}"
+                            d_later_str = f"{d_later}{dir_later}"
+
                             # Setup filenames and paths
                             suffix = "water_gain.tif" if mode == "flood" else "log-diff.tif"
-                            diff_name = f"{short_name_k}_{layer_k}_{d_later}_{d_early}_{suffix}"
+                            diff_name = f"{short_name_k}_{layer_k}_{d_later_str}_{d_early_str}_{suffix}"
                             diff_path = data_dir / diff_name
                             
-                            diff_id_str = f"{d_later}_{d_early}"
-                            diff_date_str_layout = f"{d_early}, {d_later}"
+                            diff_id_str = f"{d_later_str}_{d_early_str}"
+                            diff_date_str_layout = f"{d_early_str}, {d_later_str}"
 
                             # Submit Pipeline Task (Compute Diff -> Map -> Layout)
                             future = executor.submit(
@@ -1537,13 +1558,20 @@ def generate_products(
                 
                 input_paths = [date_map[pid]["path"] for pid in pass_ids]
                 
+                # Append orbit direction to the diff name for S1 products to distinguish A/D pairs
                 earliest_date = pass_ids[0]
+                dir_early = date_map[earliest_date].get("flight_dir", "")
+                d_early_str = f"{earliest_date}{dir_early}"
+                
                 latest_date = pass_ids[-1]
-                out_name = f"{short_name_k}_WTR_{earliest_date}_{latest_date}_max_extent.tif"
+                dir_later = date_map[latest_date].get("flight_dir", "")
+                d_later_str = f"{latest_date}{dir_later}"
+
+                out_name = f"{short_name_k}_WTR_{d_early_str}_{d_later_str}_max_extent.tif"
                 out_path = data_dir / out_name
 
-                diff_id_str = f"{earliest_date}_{latest_date}"
-                diff_date_str_layout = f"{earliest_date}, {latest_date}"
+                diff_id_str = f"{d_early_str}_{d_later_str}"
+                diff_date_str_layout = f"{d_early_str}, {d_later_str}"
                 
                 future = executor.submit(
                     run_max_extent_pipeline,
