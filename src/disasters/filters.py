@@ -237,7 +237,9 @@ def generate_coastal_mask(bbox: list, master_grid: dict) -> Optional[xr.DataArra
         return None
 
 
-def process_dem_and_slope(df: pd.DataFrame, master_grid: dict, threshold: float, output_dir: Path) -> Optional[np.ndarray]:
+def process_dem_and_slope(
+    df: pd.DataFrame, master_grid: dict, threshold: float, output_dir: Path, skip_existing: bool = False
+) -> Optional[np.ndarray]:
     """
     Fetches all DSWx-HLS Band 10 URLs and mosaics them into 'dem.tif' saved at output_dir.
     Calculates slope and returns a boolean mask (True where slope < threshold).
@@ -247,11 +249,29 @@ def process_dem_and_slope(df: pd.DataFrame, master_grid: dict, threshold: float,
         master_grid (dict): Dictionary with 'shape' and 'transform'.
         threshold (float): Slope threshold in degrees.
         output_dir (Path): Output directory for the resulting masks.
+        skip_existing (bool): Whether to skip GDAL processing if slope.tif already exists.
 
     Returns:
         np.ndarray: Mask indicating areas where slope is below threshold.
     """
     logger.info(f"Processing DEM and Slope Mask (Threshold: {threshold} deg)...")
+
+    dem_output_path = output_dir / "dem.tif"
+    slope_output_path = output_dir / "slope.tif"
+
+    # Skip Processing if slope.tif already exists
+    if skip_existing and slope_output_path.exists():
+        logger.info(f"Slope mask already exists on disk, skipping DEM download/processing.")
+        try:
+            import rasterio
+            with rasterio.open(slope_output_path) as src:
+                slope_arr = src.read(1)
+            
+            mask = (slope_arr < threshold) & (slope_arr != -9999)
+            logger.info(f"Loaded existing slope mask. Masking {np.sum(mask)} pixels < {threshold}°.")
+            return mask
+        except Exception as e:
+            logger.warning(f"Failed to read existing slope mask: {e}. Proceeding to recompute...")
 
     # Filter for ALL DSWx-HLS products to get DEMs
     dswx_rows = df[df['Dataset'] == 'OPERA_L3_DSWX-HLS_V1']
@@ -291,10 +311,6 @@ def process_dem_and_slope(df: pd.DataFrame, master_grid: dict, threshold: float,
     
     output_bounds = [min_x, min_y, max_x, max_y]
     dst_crs = master_grid.get('dst_crs')
-
-    # Define output path for the DEM and slope tifs
-    dem_output_path = output_dir / "dem.tif"
-    slope_output_path = output_dir / "slope.tif"
 
     try:
         # Warp DEMs to Disk (dem.tif), matching the master grid resolution and bounds
