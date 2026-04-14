@@ -962,7 +962,7 @@ def generate_products(
     # Generate Slope Mask if requested
     global_slope_mask = None
     if mode in ["landslide", "rtc-rgb"] and slope_threshold is not None:
-        global_slope_mask = process_dem_and_slope(df_opera, master_grid, slope_threshold, data_dir)
+        global_slope_mask = process_dem_and_slope(df_opera, master_grid, slope_threshold, data_dir, skip_existing=skip_existing)
 
     # Generate Global Coastal Mask only if not explicitly disabled
     global_coastal_mask = None
