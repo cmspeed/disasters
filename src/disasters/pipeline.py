@@ -19,7 +19,6 @@ import rasterio
 import xarray as xr
 from osgeo import gdal
 from rasterio.enums import Resampling
-from rasterio.shutil import copy
 from rasterio.warp import transform_bounds
 
 # Local/Relative Imports
@@ -658,8 +657,13 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
                     mosaic_path = output_dir / mosaic_name
                     tmp_path = output_dir / f"tmp_{mosaic_name}"
                     
-                    image = array_to_image(mosaic, colormap=colormap, nodata=nodata)
-                    copy(image, tmp_path, driver="GTiff")
+                    array_to_image(
+                        mosaic,
+                        output=tmp_path,
+                        driver="GTiff",
+                        colormap=colormap,
+                        nodata=nodata,
+                    )
                     gdal.Warp(
                         str(mosaic_path),
                         str(tmp_path),
@@ -676,8 +680,13 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
                         conf_path = output_dir / conf_name
                         conf_tmp = output_dir / f"tmp_{conf_name}"
                         
-                        conf_image = array_to_image(conf_mosaic, colormap=None, nodata=255)
-                        copy(conf_image, conf_tmp, driver="GTiff")
+                        array_to_image(
+                            conf_mosaic,
+                            output=conf_tmp,
+                            driver="GTiff",
+                            colormap=None,
+                            nodata=255,
+                        )
                         gdal.Warp(
                             str(conf_path),
                             str(conf_tmp),
@@ -1403,10 +1412,15 @@ def generate_products(
                             else:
                                 logger.info("[Water Mask] No slope threshold (-st) specified. Skipping water-related disturbance filtering.")
 
-                        image = array_to_image(mosaic, colormap=colormap, nodata=nodata)
-                        
+                        array_to_image(
+                            mosaic,
+                            output=tmp_path,
+                            driver="GTiff",
+                            colormap=colormap,
+                            nodata=nodata,
+                        )
+
                         # Save the mosaic to a temporary GeoTIFF
-                        copy(image, tmp_path, driver="GTiff")
                         warp_args = {"xRes": 30, "yRes": 30, "creationOptions": ["COMPRESS=DEFLATE"]}
                         
                         # Reproject/compress using GDAL directly into the final GeoTIFF
@@ -1442,9 +1456,14 @@ def generate_products(
 
                         # Save and plot the perfectly synced CONF layer if we generated it
                         if conf_mosaic is not None:
-                            conf_image = array_to_image(conf_mosaic, colormap=conf_colormap, nodata=255)
-                            
-                            copy(conf_image, conf_tmp, driver="GTiff")
+                            array_to_image(
+                                conf_mosaic,
+                                output=conf_tmp,
+                                driver="GTiff",
+                                colormap=conf_colormap,
+                                nodata=255,
+                            )
+
                             gdal.Warp(str(conf_path), str(conf_tmp), **warp_args)
                             save_gtiff_as_cog(conf_path, conf_path)
                             cleanup_temp_file(conf_tmp)
