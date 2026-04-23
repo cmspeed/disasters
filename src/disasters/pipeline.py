@@ -697,6 +697,72 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
     return output_dir
 
 
+def run_slope_filter_only(local_dir: Path, slope_threshold: float, output_dir: Path) -> Path | None:
+    """
+    Run a standalone pipeline to generate a slope mask and apply it to all valid rasters in the local directory.
+    """
+    from .io import scan_local_directory, ensure_directory
+    from .mosaic import get_local_spatial_properties, get_master_grid_props
+    from .filters import process_dem_and_slope, apply_slope_mask_to_raster
+    import pyproj
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[Pipeline] Running standalone SLOPE pipeline using data from: {local_dir}")
+    
+    df_opera = scan_local_directory(local_dir)
+    if df_opera.empty and not list(local_dir.glob("*.tif")):
+        logger.error("[Pipeline] No valid TIF data found in the local directory.")
+        return None
+        
+    ensure_directory(output_dir)
+    
+    # Calculate Master Grid for the Slope Generation
+    auto_bbox, target_crs_proj4 = get_local_spatial_properties(df_opera)
+    crs_obj = pyproj.CRS.from_string(target_crs_proj4)
+    target_res = 0.0002695 if crs_obj.is_geographic else 30
+    master_grid = get_master_grid_props(auto_bbox, target_crs_proj4, target_res=target_res)
+    
+    # Generate the master dem.tif and slope.tif
+    mask = process_dem_and_slope(
+        df=df_opera, 
+        master_grid=master_grid, 
+        threshold=slope_threshold, 
+        output_dir=output_dir, 
+        skip_existing=False
+    )
+    
+    slope_tif_path = output_dir / "slope.tif"
+    if mask is None or not slope_tif_path.exists():
+        logger.error("[Pipeline] Failed to generate base slope mask. Cannot proceed with filtering.")
+        return None
+
+    # Find all data files to mask (ignore DEMs, base slope outputs, and already-filtered files)
+    ignore_list = ['_B10_DEM', 'dem.tif', 'slope.tif', '_slope_filtered']
+    tifs_to_process = [
+        f for f in local_dir.glob("*.tif") 
+        if not any(ignore_str in f.name for ignore_str in ignore_list)
+    ]
+    
+    if not tifs_to_process:
+        logger.info("[Pipeline] Slope mask generated, but found no valid data TIFs to filter in the local directory.")
+        return output_dir
+
+    # Apply the mask to every relevant file
+    logger.info(f"[Pipeline] Applying {slope_threshold}° slope filter to {len(tifs_to_process)} rasters...")
+    
+    for tif_path in tifs_to_process:
+        out_name = f"{tif_path.stem}_{int(slope_threshold)}deg_slope_filtered.tif"
+        out_path = output_dir / out_name
+        
+        logger.info(f" -> Filtering {tif_path.name} to {out_name}...")
+        apply_slope_mask_to_raster(tif_path, slope_tif_path, slope_threshold, out_path)
+        
+    logger.info("[Pipeline] Standalone slope filtering complete!")
+    return output_dir
+
+
 def run_plotting_task(
     maps_dir, layouts_dir, mosaic_path, short_name, layer, 
     date_id, layout_date, layout_title, bbox, zoom_bbox, 
