@@ -218,6 +218,14 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             return list(executor.map(_load_single, links))
 
+    def _close_datasets(datasets):
+        """Close any xarray datasets/dataarrays opened for benchmarking."""
+        for ds in datasets:
+            try:
+                ds.close()
+            except Exception:
+                pass
+
     def load_datasets(links, label="Dataset"):
         """Orchestrates loading. If benchmark_stats is set, runs both and tracks cumulative stats."""
         if not links:
@@ -227,9 +235,13 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
             print(f"\n[BENCHMARK] Testing load speeds for {len(links)} items ({label})...")
             
             # Run Sequential
+            sequential_results = []
             t0 = time.time()
-            _ = _run_sequential(links)
-            t_seq = time.time() - t0
+            try:
+                sequential_results = _run_sequential(links)
+                t_seq = time.time() - t0
+            finally:
+                _close_datasets(sequential_results)
             
             # Run Concurrent
             t0 = time.time()
