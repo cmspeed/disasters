@@ -81,6 +81,53 @@ def read_opera_metadata(output_dir: Path) -> pd.DataFrame:
     return df
 
 
+def fetch_missing_dems(bbox: list, local_dir: Path) -> None:
+    """
+    Queries Earthdata for recent DSWx-HLS granules covering the bbox 
+    and downloads ONLY their _B10_DEM.tif files to the local directory.
+    """
+    import datetime
+    import earthaccess
+    
+    logger.info("[DEM Fetcher] Missing local DEMs detected. Querying Earthdata for static topography...")
+    try:
+        # We just need one recent static DEM. Look at the last 60 days to ensure coverage.
+        end_date = datetime.datetime.utcnow()
+        start_date = end_date - datetime.timedelta(days=60)
+        
+        results = earthaccess.search_data(
+            short_name="OPERA_L3_DSWX-HLS_V1",
+            bounding_box=tuple(bbox),
+            temporal=(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")),
+            count=20 # Grab enough to cover the bbox footprint
+        )
+        
+        if not results:
+            logger.warning("[DEM Fetcher] No recent DSWx-HLS granules found for this BBOX.")
+            return
+        
+        # Filter to ONLY get the _B10_DEM URLs (we don't want to download the water data)
+        dem_urls = []
+        for granule in results:
+            for link in granule.data_links():
+                if "_B10_DEM.tif" in link:
+                    dem_urls.append(link)
+                    
+        if not dem_urls:
+            logger.warning("[DEM Fetcher] Found granules, but no _B10_DEM.tif links.")
+            return
+        
+        # Remove duplicates
+        dem_urls = list(set(dem_urls))
+        
+        logger.info(f"[DEM Fetcher] Downloading {len(dem_urls)} DEM layers to {local_dir}...")
+        earthaccess.download(dem_urls, local_path=str(local_dir))
+        logger.info("[DEM Fetcher] Topography download complete.")
+        
+    except Exception as e:
+        logger.error(f"[DEM Fetcher] Failed to fetch missing DEMs: {e}")
+
+
 def cluster_by_time(df: pd.DataFrame, time_col: str = "Start Time", threshold_minutes: int = 120) -> list:
     """
     Groups dataframe rows by time clustering to separate passes (e.g. Ascending vs Descending).
