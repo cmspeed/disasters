@@ -284,32 +284,34 @@ def process_dem_and_slope(df: pd.DataFrame, master_grid: dict, threshold: float,
         if str(col).startswith('Download URL'):
                 all_paths.extend(df[col].dropna().astype(str).tolist())
 
-    has_dem_files = any('_B10_DEM' in p for p in all_paths)
     has_dswx_cloud = 'Dataset' in df.columns and df['Dataset'].str.contains('DSWx-HLS', na=False).any()
 
-    # If there are no local DEMs and no cloud DSWx links, download them
-    if not has_dem_files and not has_dswx_cloud:
-        logger.info("[Filters] No DEM data found. Initiating dynamic DEM fetcher...")
-        
-        from .pipeline import get_local_spatial_properties
-        from .catalog import fetch_missing_dems
-        
-        auto_bbox, _ = get_local_spatial_properties(df)
-        local_dir = Path(all_paths[0]).parent
-        
-        fetch_missing_dems(auto_bbox, local_dir)
-        
-        # Inject newly downloaded DEMs into our path list
-        new_dems = [str(p) for p in local_dir.glob("*_B10_DEM*.tif")]
-        if new_dems:
-            all_paths.extend(new_dems)
-        else:
-            logger.warning("[Filters] Earthdata fetch completed, but no DEMs were found on disk.")
-            return None
+    # If there are no (or partial number of) local DEMs and no cloud DSWx links, download them
+    if not has_dswx_cloud:
+            logger.info("[Filters] Verifying continuous DEM coverage for spatial footprint...")
             
-    # Gather the final list of DEM paths for GDAL processing
+            from .pipeline import get_local_spatial_properties
+            from .catalog import fetch_missing_dems
+            
+            auto_bbox, _ = get_local_spatial_properties(df)
+            local_dir = Path(all_paths[0]).parent
+            
+            # Query CMR for any missing DEMs that intersect our footprint and download them to the local directory
+            fetch_missing_dems(auto_bbox, local_dir)
+            
+            # Inject all local DEMs (existing + newly downloaded) into our path list
+            new_dems = [str(p) for p in local_dir.glob("*_B10_DEM*.tif")]
+            if not new_dems:
+                logger.warning("[Filters] Earthdata fetch completed, but no DEMs were found on disk.")
+                return None
+                
+            for dem_path in new_dems:
+                if dem_path not in all_paths:
+                    all_paths.append(dem_path)
+                
+    # Gather the complete list of DEM paths for GDAL processing
     explicit_dems = [p for p in all_paths if '_B10_DEM' in p]
-    
+
     if explicit_dems:
         dem_urls = explicit_dems
     else:
