@@ -1,3 +1,4 @@
+import atexit
 import netrc
 from pathlib import Path
 
@@ -6,6 +7,25 @@ import earthaccess
 import rasterio
 from osgeo import gdal
 from rasterio.session import AWSSession
+
+_RIO_ENV = None
+_RIO_ENV_SIGNATURE = None
+
+
+def _close_rasterio_env() -> None:
+    """Close the cached Rasterio environment when it is replaced or on exit."""
+    global _RIO_ENV, _RIO_ENV_SIGNATURE
+
+    if _RIO_ENV is None:
+        return
+
+    try:
+        _RIO_ENV.__exit__(None, None, None)
+    except Exception:
+        pass
+    finally:
+        _RIO_ENV = None
+        _RIO_ENV_SIGNATURE = None
 
 
 def authenticate() -> tuple[str, str]:
@@ -45,6 +65,20 @@ def authenticate() -> tuple[str, str]:
         GDAL_HTTP_COOKIEJAR=cookie_path,
     )
 
+    env_signature = (
+        cookie_path,
+        temp_creds_req["accessKeyId"],
+        temp_creds_req["secretAccessKey"],
+        temp_creds_req["sessionToken"],
+    ) if isinstance(temp_creds_req, dict) and all(
+        k in temp_creds_req for k in ("accessKeyId", "secretAccessKey", "sessionToken")
+    ) else (
+        cookie_path,
+        None,
+        None,
+        None,
+    )
+
     if isinstance(temp_creds_req, dict) and all(k in temp_creds_req for k in ("accessKeyId", "secretAccessKey", "sessionToken")):
         # Apply AWS Creds to Rasterio
         session = boto3.Session(
@@ -65,8 +99,13 @@ def authenticate() -> tuple[str, str]:
             print("[WARNING] S3 credentials missing expected keys; continuing without AWS session.")
         rio_env = rasterio.Env(**env_kwargs)
 
-    # Keep Rasterio env open globally for the duration of the script execution
-    rio_env.__enter__()
+    # Keep one Rasterio env open per process and refresh it only when credentials change.
+    global _RIO_ENV, _RIO_ENV_SIGNATURE
+    if _RIO_ENV_SIGNATURE != env_signature:
+        _close_rasterio_env()
+        rio_env.__enter__()
+        _RIO_ENV = rio_env
+        _RIO_ENV_SIGNATURE = env_signature
 
     # Parse credentials from ~/.netrc (used for xarray endpoints)
     netrc_file = Path.home() / ".netrc"
@@ -78,3 +117,6 @@ def authenticate() -> tuple[str, str]:
         username, password = None, None
 
     return username, password
+
+
+atexit.register(_close_rasterio_env)
