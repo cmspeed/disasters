@@ -77,52 +77,66 @@ class PipelineConfig:
     skip_existing: bool = False
 
 
-def get_local_spatial_properties(df_opera: pd.DataFrame) -> tuple[list[float], str]:
+def get_local_spatial_properties(df: pd.DataFrame) -> tuple[list[float], str]:
     """
     Calculates the global bounding box [S, N, W, E] and most common CRS 
     from a local DataFrame of OPERA products by reading their headers.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing metadata about local OPERA products, 
+                                 including columns with file paths.
+    Returns:
+        tuple[list[float], str]: A tuple containing the bounding box as [S, N, W, E] and the most common CRS in PROJ4 string format.
     """
+    logger = logging.getLogger(__name__)
     logger.info("Calculating spatial properties from local files...")
-    url_cols = [c for c in df_opera.columns if c.startswith("Download URL")]
-    all_files = []
-    for c in url_cols:
-        all_files.extend(df_opera[c].dropna().tolist())
-    all_files = list(set(all_files)) # Unique files only
-
-    minx, miny, maxx, maxy = float('inf'), float('inf'), float('-inf'), float('-inf')
-    crs_counter = Counter()
-
-    for f in all_files:
-        try:
-            with rasterio.open(f) as src:
-                bounds = src.bounds
-                crs = src.crs
-                
-                if crs is not None:
-                    crs_counter[crs.to_string()] += 1
+    
+    min_s, max_n, min_w, max_e = 90.0, -90.0, 180.0, -180.0
+    target_crs_wkt = None
+    valid_files = 0
+    
+    for _, row in df.iterrows():
+        # Try to get the explicit Filepath (used by standalone slope filter)
+        filepath = row.get('Filepath')
+        
+        # If no Filepath column, grab the first valid 'Download URL' column
+        if pd.isna(filepath):
+            for col in df.columns:
+                if str(col).startswith("Download URL") and pd.notna(row[col]):
+                    filepath = row[col]
+                    break
                     
-                # Transform to EPSG:4326 to match S, N, W, E expected format
-                if crs and crs.to_string() != "EPSG:4326":
-                    left, bottom, right, top = transform_bounds(crs, "EPSG:4326", *bounds)
-                else:
-                    left, bottom, right, top = bounds
+        # If we still don't have a file, skip to the next row
+        if pd.isna(filepath):
+            continue
+            
+        try:
+            # Extract CRS and bounds using rasterio
+            with rasterio.open(filepath) as src:
+                if src.crs is None:
+                    logger.warning(f"[Spatial Calc] File {filepath} has no CRS metadata! Skipping...")
+                    continue
+                    
+                if not target_crs_wkt:
+                    target_crs_wkt = src.crs.to_wkt()
                 
-                minx = min(minx, left)
-                miny = min(miny, bottom)
-                maxx = max(maxx, right)
-                maxy = max(maxy, top)
+                # rasterio bounds are (west, south, east, north)
+                bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+                
+                min_w = min(min_w, bounds[0])
+                min_s = min(min_s, bounds[1])
+                max_e = max(max_e, bounds[2])
+                max_n = max(max_n, bounds[3])
+                
+                valid_files += 1
+                
         except Exception as e:
-            logger.warning(f"Could not read spatial properties from {f}: {e}")
-
-    if minx == float('inf'):
-        raise RuntimeError("Could not calculate bounding box from local files.")
-
-    most_common_crs = crs_counter.most_common(1)[0][0]
-    
-    logger.info(f"Local Master CRS determined: {most_common_crs}")
-    
-    # Return [S, N, W, E] and the CRS
-    return [miny, maxy, minx, maxx], most_common_crs
+            logger.error(f"[Spatial Calc] Failed to read {filepath}. Reason: {e}")
+            
+    if valid_files == 0:
+        raise RuntimeError("Could not calculate bounding box from local files. Check the errors above to see why rasterio rejected the files!")
+        
+    return [min_s, max_n, min_w, max_e], target_crs_wkt
 
 
 def run_pipeline(config: PipelineConfig) -> Path | None:
@@ -700,9 +714,16 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
 def run_slope_filter_only(local_dir: Path, slope_threshold: float, output_dir: Path) -> Path | None:
     """
     Run a standalone pipeline to generate a slope mask and apply it to all valid rasters in the local directory.
+
+    Args:
+        local_dir (Path): Directory containing the raw OPERA GeoTIFFs to process.
+        slope_threshold (float): Slope angle threshold in degrees for masking.
+        output_dir (Path): Directory to save the slope-filtered outputs.
+    Returns:
+        Path | None: The output directory containing slope-filtered rasters, or None if the process failed.
     """
     from .io import scan_local_directory, ensure_directory
-    from .mosaic import get_local_spatial_properties, get_master_grid_props
+    from .mosaic import get_master_grid_props
     from .filters import process_dem_and_slope, apply_slope_mask_to_raster
     import pyproj
     import logging
@@ -710,20 +731,41 @@ def run_slope_filter_only(local_dir: Path, slope_threshold: float, output_dir: P
     logger = logging.getLogger(__name__)
     
     logger.info(f"[Pipeline] Running standalone SLOPE pipeline using data from: {local_dir}")
-    
+
+    logger.info("[Pipeline] Authenticating with Earthdata...")
+    authenticate()
+
+    # Gather metadata about the local OPERA files to calculate spatial properties and find valid rasters to process
     df_opera = scan_local_directory(local_dir)
-    if df_opera.empty and not list(local_dir.glob("*.tif")):
-        logger.error("[Pipeline] No valid TIF data found in the local directory.")
+
+    # Find all data files to mask (ignore DEMs, base slope outputs, and already-filtered files)
+    ignore_list = ['_B10_DEM', 'dem.tif', 'slope.tif', '_slope_filtered']
+    tifs_to_process = [
+        f for f in local_dir.glob("*.tif") 
+        if not any(ignore_str in f.name for ignore_str in ignore_list)
+    ]
+    
+    if not tifs_to_process:
+        logger.error("[Pipeline] No valid data TIFs found in the local directory to process.")
         return None
         
     ensure_directory(output_dir)
+
+    # Gather filepaths into a DataFrame for spatial calculations
+    df_spatial = pd.DataFrame({'Filepath': [str(p) for p in tifs_to_process]})
     
     # Calculate Master Grid for the Slope Generation
-    auto_bbox, target_crs_proj4 = get_local_spatial_properties(df_opera)
+    auto_bbox, target_crs_proj4 = get_local_spatial_properties(df_spatial)
     crs_obj = pyproj.CRS.from_string(target_crs_proj4)
     target_res = 0.0002695 if crs_obj.is_geographic else 30
     master_grid = get_master_grid_props(auto_bbox, target_crs_proj4, target_res=target_res)
     
+    # If the dir is empty or only contains mosaics, seed it with spatial metadata
+    if df_opera.empty:
+        df_opera = df_spatial.copy()
+        df_opera['Dataset'] = 'CUSTOM_MOSAIC'
+        df_opera['Download URL WTR'] = None
+
     # Generate the master dem.tif and slope.tif
     mask = process_dem_and_slope(
         df=df_opera, 
@@ -738,21 +780,11 @@ def run_slope_filter_only(local_dir: Path, slope_threshold: float, output_dir: P
         logger.error("[Pipeline] Failed to generate base slope mask. Cannot proceed with filtering.")
         return None
 
-    # Find all data files to mask (ignore DEMs, base slope outputs, and already-filtered files)
-    ignore_list = ['_B10_DEM', 'dem.tif', 'slope.tif', '_slope_filtered']
-    tifs_to_process = [
-        f for f in local_dir.glob("*.tif") 
-        if not any(ignore_str in f.name for ignore_str in ignore_list)
-    ]
-    
-    if not tifs_to_process:
-        logger.info("[Pipeline] Slope mask generated, but found no valid data TIFs to filter in the local directory.")
-        return output_dir
-
     # Apply the mask to every relevant file
     logger.info(f"[Pipeline] Applying {slope_threshold}° slope filter to {len(tifs_to_process)} rasters...")
     
     for tif_path in tifs_to_process:
+        # Create output filename clearly linked to the input
         out_name = f"{tif_path.stem}_{int(slope_threshold)}deg_slope_filtered.tif"
         out_path = output_dir / out_name
         
