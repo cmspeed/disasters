@@ -237,12 +237,11 @@ def generate_coastal_mask(bbox: list, master_grid: dict) -> Optional[xr.DataArra
         return None
 
 
-def process_dem_and_slope(
-    df: pd.DataFrame, master_grid: dict, threshold: float, output_dir: Path, skip_existing: bool = False
-) -> Optional[np.ndarray]:
+def process_dem_and_slope(df: pd.DataFrame, master_grid: dict, threshold: float, output_dir: Path, skip_existing: bool = True):
     """
-    Fetches all DSWx-HLS Band 10 URLs and mosaics them into 'dem.tif' saved at output_dir.
-    Calculates slope and returns a boolean mask (True where slope < threshold).
+    Fetches all DSWx-HLS Band 10 URLs (or downloads them if missing) and mosaics them 
+    into 'dem.tif' saved at output_dir. Calculates slope and returns a boolean mask 
+    (True where slope < threshold).
 
     Args:
         df (pd.DataFrame): DataFrame containing OPERA products metadata.
@@ -254,8 +253,12 @@ def process_dem_and_slope(
     Returns:
         np.ndarray: Mask indicating areas where slope is below threshold.
     """
-    logger.info(f"Processing DEM and Slope Mask (Threshold: {threshold} deg)...")
+    from .catalog import fetch_missing_dems
+    from .io import scan_local_directory
+    from .mosaic import get_local_spatial_properties
 
+    logger.info(f"[Filters] Processing DEM and generating slope mask (> {threshold} degrees)...")
+    
     dem_output_path = output_dir / "dem.tif"
     slope_output_path = output_dir / "slope.tif"
 
@@ -273,30 +276,49 @@ def process_dem_and_slope(
         except Exception as e:
             logger.warning(f"Failed to read existing slope mask: {e}. Proceeding to recompute...")
 
-    # Filter for ALL DSWx-HLS products to get DEMs
-    dswx_rows = df[df['Dataset'] == 'OPERA_L3_DSWX-HLS_V1']
+    # Check if we have DEM files locally or DSWx-HLS cloud links
+    has_dem_files = any('_B10_DEM' in str(path) for path in df['Filepath'].dropna() if pd.notna(path))
+    has_dswx_cloud = not df[df['Dataset'] == 'OPERA_L3_DSWX-HLS_V1'].empty
     
-    # Check if any DSWx-HLS products are available to generate the DEM mosaic.
-    if dswx_rows.empty:
-        logger.warning("No DSWx-HLS products found. Cannot generate DEM or slope mask.")
-        return None
+    # If there are no local DEMs and no cloud DSWx-HLS links, download them
+    if not has_dem_files and not has_dswx_cloud:
+        logger.info("[Filters] No DEM data found in DataFrame. Initiating dynamic DEM fetcher...")
+        
+        # Get bbox from the existing local files
+        auto_bbox, _ = get_local_spatial_properties(df)
+        
+        # Determine the local directory from the first available filepath
+        first_valid_file = df['Filepath'].dropna().iloc[0]
+        local_dir = Path(first_valid_file).parent
+        
+        # Fetch the DEMs
+        fetch_missing_dems(auto_bbox, local_dir)
+        
+        # Rescan the directory so our DataFrame now includes the newly downloaded B10_DEM files
+        df = scan_local_directory(local_dir)
 
     # Construct Band 10 DEM URLs
     dem_urls = []
-    # Drop duplicates to avoid downloading/warping the same granule twice
-    for url in dswx_rows['Download URL WTR'].dropna().unique():
-        if '_B01_WTR' in url:
-            # Replace WTR with DEM band
-            dem_url = url.replace('_B01_WTR', '_B10_DEM')
-            
-            # Prefix for GDAL vsicurl
-            if dem_url.startswith('http') and not dem_url.startswith('/vsi'):
-                dem_urls.append(f'/vsicurl/{dem_url}')
-            else:
-                dem_urls.append(dem_url)
+    explicit_dems = df[df['Filepath'].str.contains('_B10_DEM', na=False, case=False)]['Filepath'].tolist()
+    
+    if explicit_dems:
+        dem_urls = explicit_dems
+    else:
+        # Fallback for cloud mode: deduce DEM URLs from DSWx WTR URLs
+        dswx_rows = df[df['Dataset'] == 'OPERA_L3_DSWX-HLS_V1']
+        for url in dswx_rows['Download URL WTR'].dropna().unique():
+            if '_B01_WTR' in url:
+                if url.startswith('http') and not url.startswith('/vsi'):
+                    dem_url = url.replace('_B01_WTR', '_B10_DEM')
+                    dem_urls.append(f'/vsicurl/{dem_url}')
+                else:
+                    local_dem_path = url.replace('_B01_WTR', '_B10_DEM')
+                    dem_urls.append(local_dem_path)
+                    
+    dem_urls = list(set(dem_urls))
     
     if not dem_urls:
-        logger.warning("Could not construct Band 10 URLs.")
+        logger.warning("[Filters] Failed to identify or fetch any DEM URLs. Skipping slope masking.")
         return None
 
     # Extract Master Grid Properties
@@ -356,3 +378,59 @@ def process_dem_and_slope(
     except Exception as e:
         logger.warning(f"Slope processing failed: {e}")
         return None
+    
+
+def apply_slope_mask_to_raster(target_tif: Path, slope_tif: Path, threshold: float, output_tif: Path):
+    """
+    Dynamically reprojects the slope mask to match the target raster's grid, 
+    applies the mask, and saves the filtered output.
+    """
+    import rasterio
+    import numpy as np
+    from rasterio.warp import reproject, Resampling
+    import logging
+    
+    logger = logging.getLogger(__name__)
+
+    try:
+        with rasterio.open(target_tif) as src:
+            target_meta = src.meta.copy()
+            target_arr = src.read(1)
+            target_crs = src.crs
+            target_transform = src.transform
+            nodata_val = src.nodata if src.nodata is not None else -9999
+
+        with rasterio.open(slope_tif) as slope_src:
+            # Create an empty array matching the target raster's exact shape
+            aligned_slope_arr = np.empty_like(target_arr, dtype=np.float32)
+            
+            # Reproject the slope data dynamically into the target's grid space
+            reproject(
+                source=rasterio.band(slope_src, 1),
+                destination=aligned_slope_arr,
+                src_transform=slope_src.transform,
+                src_crs=slope_src.crs,
+                dst_transform=target_transform,
+                dst_crs=target_crs,
+                resampling=Resampling.bilinear
+            )
+
+        # Apply the mask: If slope >= threshold OR slope is nodata, set target pixel to nodata
+        filtered_arr = np.where(
+            (aligned_slope_arr >= threshold) | (aligned_slope_arr == -9999), 
+            nodata_val, 
+            target_arr
+        )
+
+        # Ensure the output meta has a defined nodata value and uses compression
+        target_meta.update({
+            "driver": "COG",
+            "compress": "deflate",
+            "nodata": nodata_val
+        })
+
+        with rasterio.open(output_tif, 'w', **target_meta) as dst:
+            dst.write(filtered_arr, 1)
+            
+    except Exception as e:
+        logger.error(f"Failed to apply slope mask to {target_tif.name}: {e}")
