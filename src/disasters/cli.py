@@ -512,5 +512,49 @@ def mosaic(
     else:
         logger.warning("Mosaic pipeline exited without producing outputs.")
 
+
+@cli.command(name="slope-filter")
+@click.option(
+    "-ld",
+    "--local-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True, exists=True),
+    required=True,
+    help="Path to a local directory containing pre-downloaded OPERA geotiffs.",
+)
+@click.option(
+    "-st", 
+    "--slope-threshold", 
+    type=float, 
+    required=True,
+    help="Slope threshold in degrees (0-100) to define the resulting mask.",
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    required=True,
+    help="Directory where the generated dem.tif and slope.tif will be saved.",
+)
+def slope_filter(local_dir: Path, slope_threshold: float, output_dir: Path) -> None:
+    """Generate a standalone DEM and slope mask from local OPERA products."""
+    
+    if not (0 <= slope_threshold <= 100):
+        raise click.BadParameter("Slope threshold must be between 0 and 100.", param_hint="--slope-threshold")
+
+    from .pipeline import run_slope_filter_only
+    
+    logger.info(f"Starting standalone slope filter pipeline for threshold > {slope_threshold} degrees...")
+    out_dir = run_slope_filter_only(
+        local_dir=local_dir,
+        slope_threshold=slope_threshold,
+        output_dir=output_dir
+    )
+    
+    if out_dir:
+        logger.info(f"Slope generation complete. Files saved to: {out_dir}")
+    else:
+        logger.warning("Slope pipeline exited without producing outputs.")
+
+
 if __name__ == "__main__":
     cli()
