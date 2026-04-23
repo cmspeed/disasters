@@ -10,6 +10,53 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def parse_bbox_input(bbox_string: str) -> list[float]:
+    """
+    Parses a string input (KML, GeoJSON, WKT, or 4 coordinates) 
+    into a standardized [South, North, West, East] bounding box list.
+    Args:
+        bbox_string (str): Input string representing a bounding box. 
+            Can be a file path to KML/GeoJSON/SHP, a WKT string, or raw coordinates.
+    Returns:
+        list[float]: Bounding box in the format [South, North, West, East].
+    """
+    import os
+    import geopandas as gpd
+    from shapely import wkt
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Check if it's a geospatial file-type (KML, GeoJSON, SHP)
+    if os.path.isfile(bbox_string):
+        if bbox_string.lower().endswith('.kml'):
+            import fiona
+            # Enable KML driver for geopandas/fiona
+            fiona.drvsupport.supported_drivers['KML'] = 'rw'
+            fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
+            
+        logger.info(f"Extracting bounding box from file: {bbox_string}")
+        gdf = gpd.read_file(bbox_string)
+        # GeoPandas total_bounds returns [minx, miny, maxx, maxy] -> [West, South, East, North]
+        w, s, e, n = gdf.total_bounds
+        return [s, n, w, e]
+        
+    # Check if it's a WKT string
+    if bbox_string.upper().startswith(('POLYGON', 'MULTIPOLYGON', 'BBOX')):
+        logger.info("Extracting bounding box from WKT string...")
+        geom = wkt.loads(bbox_string)
+        w, s, e, n = geom.bounds
+        return [s, n, w, e]
+        
+    # Assume it's a raw coordinate string
+    logger.info("Parsing raw coordinates...")
+    coords = [float(x) for x in bbox_string.replace(',', ' ').split()]
+    if len(coords) != 4:
+        raise ValueError("Bounding box must be a valid file, WKT, or 4 space/comma separated coordinates.")
+    
+    return coords
+
+
 def ensure_directory(output_dir: Path) -> Path:
     """
     Create the output directory if it does not exist.

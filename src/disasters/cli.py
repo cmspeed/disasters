@@ -34,18 +34,11 @@ def cli() -> None:
 
 @cli.command(name="run")
 @click.option(
-    "-b",
-    "--bbox",
+    "-b", 
+    "--bbox", 
     type=str,
-    required=True,
-    help=(
-        "Bounding box or area of interest. MUST be enclosed in double quotes if it contains spaces. "
-        "Accepted formats: "
-        "1) 4 floats: \"S N W E\" | "
-        "2) WKT string: \"POLYGON((...))\" | "
-        "3) Local path: \"/path/to/file.kml\" | "
-        "4) Web URL: \"https://example.com/AOI.geojson\""
-    ),
+    required=True, 
+    help="Bounding box (4 coords, WKT, or path to KML/GeoJSON). Defines the search and processing AOI."
 )
 @click.option(
     "-zb",
@@ -207,33 +200,30 @@ def run(
     skip_existing: bool
 ) -> None:
     """Run the disaster pipeline (end-to-end)."""
+
+    from .io import parse_bbox_input
+    from .pipeline import run_pipeline
+    import logging
+
+    logger = logging.getLogger(__name__)
+
     # Ensure slope values are between 0 and 100 degrees, if provided
     if slope_threshold is not None and not (0 <= slope_threshold <= 100):
         raise click.BadParameter("Slope threshold must be between 0 and 100.", param_hint="--slope-threshold")
 
-    # Process bbox tokens into a list of floats OR a single WKT/path string
-    bbox_parts = bbox.replace(",", " ").split()
-    
-    if len(bbox_parts) == 4:
-        try:
-            bbox_arg = [float(x) for x in bbox_parts]
-        except ValueError:
-            bbox_arg = bbox
-    else:
-        # Keep as WKT string or file path
-        bbox_arg = bbox
+    # Parse bbox input
+    try:
+        bbox_arg = parse_bbox_input(bbox)
+    except Exception as e:
+        raise click.BadParameter(f"Failed to parse bounding box: {e}", param_hint="--bbox")
 
-    # Process zoom_bbox if provided
+    # Parse zoom_bbox input, if provided
     zoom_bbox_arg = None
     if zoom_bbox is not None:
-        zoom_parts = zoom_bbox.replace(",", " ").split()
-        if len(zoom_parts) == 4:
-            try:
-                zoom_bbox_arg = [float(x) for x in zoom_parts]
-            except ValueError:
-                raise click.BadParameter("Zoom bounding box must contain exactly 4 valid numbers.", param_hint="--zoom-bbox")
-        else:
-            raise click.BadParameter("Zoom bounding box must contain exactly 4 valid numbers.", param_hint="--zoom-bbox")
+        try:
+            zoom_bbox_arg = parse_bbox_input(zoom_bbox)
+        except Exception as e:
+            raise click.BadParameter(f"Failed to parse zoom bounding box: {e}", param_hint="--zoom-bbox")
 
     # Build the PipelineConfig object
     cfg = PipelineConfig(
@@ -439,11 +429,18 @@ def download(
 
 @cli.command(name="mosaic")
 @click.option(
-    "-i",
-    "--input-dir",
+    "-b",
+    "--bbox",
+    type=str,
+    required=False,
+    help="Bounding box (4 coords, WKT, or path to KML/GeoJSON). Limits mosaic extent.",
+)
+@click.option(
+    "-ld",
+    "--local-dir",
     type=click.Path(path_type=Path, file_okay=False, dir_okay=True, exists=True),
     required=True,
-    help="Path to a local directory containing pre-downloaded OPERA geotiffs.",
+    help="Path to a local directory containing pre-downloaded OPERA geotiffs. The mosaic will be built from these files."
 )
 @click.option(
     "-o",
@@ -453,18 +450,6 @@ def download(
     help="Directory where the stitched GeoTIFF mosaics will be saved.",
 )
 @click.option(
-    "-b",
-    "--bbox",
-    type=str,
-    required=False,
-    default=None,
-    help=(
-        "Optional bounding box to crop the output. If omitted, the pipeline computes the geographic union of all inputs. "
-        "MUST be enclosed in double quotes if it contains spaces. "
-        "Accepted formats: \"S N W E\" | \"POLYGON((...))\" | \"/path/to/file.kml\""
-    ),
-)
-@click.option(
     "--benchmark", 
     is_flag=True, 
     default=False,
@@ -472,38 +457,28 @@ def download(
 )
 
 def mosaic(
-    input_dir: Path,
-    output_dir: Path,
     bbox: Optional[str],
+    local_dir: Path,
+    output_dir: Path,
     benchmark: bool
 ) -> None:
     """Stitch local OPERA granules into analysis-ready mosaics (No analysis/layouts)."""
-    
-    # Process optional bbox using the same parsing as the run command
-    bbox_arg = None
-    if bbox is not None:
-        bbox_parts = bbox.replace(",", " ").split()
-        if len(bbox_parts) == 4:
-            try:
-                coords = [float(x) for x in bbox_parts]
-                # Auto-swap S/N if flipped
-                if coords[0] > coords[1]: coords[0], coords[1] = coords[1], coords[0]
-                # Auto-swap W/E if flipped
-                if coords[2] > coords[3]: coords[2], coords[3] = coords[3], coords[2]
-                bbox_arg = coords
-            except ValueError:
-                bbox_arg = bbox
-        else:
-            bbox_arg = bbox
-
-    # Import the dedicated mosaic pipeline (we will build this next)
+    from .io import parse_bbox_input
     from .pipeline import run_mosaic_only
+
+    # Parse the input string into the [S, N, W, E] list
+    parsed_bbox = None
+    if bbox:
+        try:
+            parsed_bbox = parse_bbox_input(bbox)
+        except Exception as e:
+            raise click.BadParameter(f"Failed to parse bounding box: {e}", param_hint="--bbox")
     
     logger.info("Starting mosaic pipeline...")
     output_path = run_mosaic_only(
-        input_dir=input_dir,
+        input_dir=local_dir,
         output_dir=output_dir,
-        bbox=bbox_arg,
+        bbox=parsed_bbox,
         benchmark=benchmark
     )
     
