@@ -88,16 +88,22 @@ def fetch_missing_dems(bbox: list, local_dir: Path) -> None:
     """
     import datetime
     import earthaccess
+    import logging
     
     logger.info("[DEM Fetcher] Missing local DEMs detected. Querying Earthdata for static topography...")
+    
     try:
-        # We just need one recent static DEM. Look at the last 60 days to ensure coverage.
-        end_date = datetime.datetime.utcnow()
+        # Repackage our [S, N, W, E] bbox into Earthaccess format: (W, S, E, N)
+        s, n, w, e = bbox
+        cmr_bbox = (w, s, e, n)
+        
+        # Query Earthdata for recent DSWx-HLS granules covering the bbox (last 60 days)
+        end_date = datetime.datetime.now(datetime.timezone.utc)
         start_date = end_date - datetime.timedelta(days=60)
         
         results = earthaccess.search_data(
             short_name="OPERA_L3_DSWX-HLS_V1",
-            bounding_box=tuple(bbox),
+            bounding_box=cmr_bbox,
             temporal=(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")),
             count=20 # Grab enough to cover the bbox footprint
         )
@@ -106,7 +112,7 @@ def fetch_missing_dems(bbox: list, local_dir: Path) -> None:
             logger.warning("[DEM Fetcher] No recent DSWx-HLS granules found for this BBOX.")
             return
         
-        # Filter to ONLY get the _B10_DEM URLs (we don't want to download the water data)
+        # Filter to get only the _B10_DEM URLs
         dem_urls = []
         for granule in results:
             for link in granule.data_links():

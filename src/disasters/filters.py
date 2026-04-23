@@ -255,7 +255,7 @@ def process_dem_and_slope(df: pd.DataFrame, master_grid: dict, threshold: float,
     """
     from .catalog import fetch_missing_dems
     from .io import scan_local_directory
-    from .mosaic import get_local_spatial_properties
+    from .pipeline import get_local_spatial_properties
 
     logger.info(f"[Filters] Processing DEM and generating slope mask (> {threshold} degrees)...")
     
@@ -277,29 +277,38 @@ def process_dem_and_slope(df: pd.DataFrame, master_grid: dict, threshold: float,
             logger.warning(f"Failed to read existing slope mask: {e}. Proceeding to recompute...")
 
     # Check if we have DEM files locally or DSWx-HLS cloud links
-    has_dem_files = any('_B10_DEM' in str(path) for path in df['Filepath'].dropna() if pd.notna(path))
-    has_dswx_cloud = not df[df['Dataset'] == 'OPERA_L3_DSWX-HLS_V1'].empty
-    
-    # If there are no local DEMs and no cloud DSWx-HLS links, download them
+    all_paths = []
+    if 'Filepath' in df.columns:
+        all_paths.extend(df['Filepath'].dropna().astype(str).tolist())
+    for col in df.columns:
+        if str(col).startswith('Download URL'):
+                all_paths.extend(df[col].dropna().astype(str).tolist())
+
+    has_dem_files = any('_B10_DEM' in p for p in all_paths)
+    has_dswx_cloud = 'Dataset' in df.columns and df['Dataset'].str.contains('DSWx-HLS', na=False).any()
+
+    # If there are no local DEMs and no cloud DSWx links, download them
     if not has_dem_files and not has_dswx_cloud:
-        logger.info("[Filters] No DEM data found in DataFrame. Initiating dynamic DEM fetcher...")
+        logger.info("[Filters] No DEM data found. Initiating dynamic DEM fetcher...")
         
-        # Get bbox from the existing local files
+        from .pipeline import get_local_spatial_properties
+        from .catalog import fetch_missing_dems
+        
         auto_bbox, _ = get_local_spatial_properties(df)
+        local_dir = Path(all_paths[0]).parent
         
-        # Determine the local directory from the first available filepath
-        first_valid_file = df['Filepath'].dropna().iloc[0]
-        local_dir = Path(first_valid_file).parent
-        
-        # Fetch the DEMs
         fetch_missing_dems(auto_bbox, local_dir)
         
-        # Rescan the directory so our DataFrame now includes the newly downloaded B10_DEM files
-        df = scan_local_directory(local_dir)
-
-    # Construct Band 10 DEM URLs
-    dem_urls = []
-    explicit_dems = df[df['Filepath'].str.contains('_B10_DEM', na=False, case=False)]['Filepath'].tolist()
+        # Inject newly downloaded DEMs into our path list
+        new_dems = [str(p) for p in local_dir.glob("*_B10_DEM*.tif")]
+        if new_dems:
+            all_paths.extend(new_dems)
+        else:
+            logger.warning("[Filters] Earthdata fetch completed, but no DEMs were found on disk.")
+            return None
+            
+    # Gather the final list of DEM paths for GDAL processing
+    explicit_dems = [p for p in all_paths if '_B10_DEM' in p]
     
     if explicit_dems:
         dem_urls = explicit_dems

@@ -791,7 +791,7 @@ def run_slope_filter_only(local_dir: Path, slope_threshold: float, output_dir: P
         logger.info(f" -> Filtering {tif_path.name} to {out_name}...")
         apply_slope_mask_to_raster(tif_path, slope_tif_path, slope_threshold, out_path)
         
-    logger.info("[Pipeline] Standalone slope filtering complete!")
+    logger.info("[Pipeline] Slope filtering complete.")
     return output_dir
 
 
