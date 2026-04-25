@@ -239,9 +239,9 @@ def compute_and_write_difference(
             tmp_gtiff = out_path.with_suffix(".tmp.tif")
             final_data.rio.to_raster(tmp_gtiff, compress="DEFLATE", tiled=True, dtype="uint8")
 
-            # Inject Colormap and Metadata
+            # Inject Metadata. Skip embedded colormap writes here because GTiff
+            # palette writes can crash this Linux GDAL/libtiff stack.
             with rasterio.open(tmp_gtiff, 'r+') as dst:
-                dst.write_colormap(1, active_colormap)
                 tags = {f"CLASS_{k}": v for k, v in active_names.items()}
                 dst.update_tags(**tags)
 
@@ -357,7 +357,6 @@ def compute_and_write_difference_positive_change_only(
         }
 
         with rasterio.open(tmp_gtiff, 'r+') as dst:
-            dst.write_colormap(1, custom_colormap)
             tags = {f"CLASS_{k}": v for k, v in class_names.items()}
             dst.update_tags(**tags)
 
@@ -460,7 +459,6 @@ def compute_and_write_max_flood_extent(
     }
 
     with rasterio.open(tmp_gtiff, 'r+') as dst:
-        dst.write_colormap(1, custom_colormap)
         tags = {f"CLASS_{k}": v for k, v in class_names.items()}
         dst.update_tags(**tags)
 

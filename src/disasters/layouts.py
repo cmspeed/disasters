@@ -22,6 +22,89 @@ from .io import cleanup_temp_file
 logger = logging.getLogger(__name__)
 
 
+def _cpt_to_cmap_dict(cpt_path: Path) -> dict[int, tuple[int, int, int, int]]:
+    """Parse the start colors from a GMT CPT file into a simple RGBA dict."""
+    cmap_dict = {}
+    with open(cpt_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith(("#", "B", "F", "N")):
+                continue
+            parts = line.split(";", 1)[0].split()
+            if len(parts) < 2:
+                continue
+            try:
+                value = int(float(parts[0]))
+            except ValueError:
+                continue
+            color = parts[1].split("@", 1)[0]
+            if "/" not in color:
+                continue
+            try:
+                r, g, b = [int(channel) for channel in color.split("/")[:3]]
+            except ValueError:
+                continue
+            cmap_dict[value] = (r, g, b, 255)
+    return cmap_dict
+
+
+def _default_conf_cmap(short_name: str) -> dict[int, tuple[int, int, int, int]]:
+    """Fallback CONF colormap when the GeoTIFF has no embedded palette."""
+    if "HLS" in short_name:
+        return {
+            0: (255, 255, 255, 255),
+            1: (0, 0, 255, 255),
+            2: (95, 127, 255, 255),
+            3: (0, 195, 0, 255),
+            4: (150, 255, 150, 255),
+            10: (213, 213, 213, 255),
+            11: (91, 91, 213, 255),
+            12: (136, 151, 213, 255),
+            13: (91, 184, 91, 255),
+            14: (163, 213, 163, 255),
+            20: (0, 255, 255, 255),
+            21: (0, 255, 255, 255),
+            22: (0, 255, 255, 255),
+            23: (0, 255, 255, 255),
+            24: (0, 255, 255, 255),
+            254: (0, 0, 127, 255),
+            255: (0, 0, 0, 0),
+        }
+    return {
+        0: (255, 255, 255, 255),
+        1: (0, 0, 255, 255),
+        2: (95, 127, 255, 255),
+        5: (0, 170, 0, 255),
+        6: (255, 215, 0, 255),
+        7: (255, 215, 0, 255),
+        30: (180, 180, 180, 255),
+        31: (120, 120, 255, 255),
+        32: (170, 170, 255, 255),
+        35: (120, 210, 120, 255),
+        36: (255, 235, 140, 255),
+        37: (255, 235, 140, 255),
+        250: (120, 80, 80, 255),
+        251: (120, 80, 80, 255),
+        255: (0, 0, 0, 0),
+    }
+
+
+def _write_cpt_from_cmap(color_palette: Path, cmap_dict: dict[int, tuple[int, int, int, int]]) -> None:
+    """Write a GMT CPT from a simple RGBA colormap dict."""
+    with open(color_palette, "w") as f:
+        for val in range(256):
+            if val in cmap_dict:
+                r, g, b, a = cmap_dict[val]
+                transparency = int(100 * (1 - (a / 255.0)))
+                if val == 255 or a == 0:
+                    f.write(f"{val} {r}/{g}/{b}@100 {val+1} {r}/{g}/{b}@100\n")
+                else:
+                    f.write(f"{val} {r}/{g}/{b}@{transparency} {val+1} {r}/{g}/{b}@{transparency}\n")
+            else:
+                f.write(f"{val} 0/0/0@100 {val+1} 0/0/0@100\n")
+        f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
+
+
 def expand_region(region: list, width_deg: float = 15, height_deg: float = 10) -> list:
     """
     Return a new region [xmin, xmax, ymin, ymax] of fixed size,
@@ -371,32 +454,32 @@ def make_map(
                 except ValueError:
                     logger.warning(f"No embedded colormap found in {mosaic_path}")
 
-            # Build the CPT on-the-fly directly from the GeoTIFF
-            color_palette = str(maps_dir / f"dynamic_cpt_{unique_id}.cpt")
-            with open(color_palette, "w") as f:
-                if cmap_dict:
-                    for val in range(256):
-                        if val in cmap_dict:
-                            r, g, b, a = cmap_dict[val]
-                            transparency = int(100 * (1 - (a / 255.0)))
-                            # Force Nodatas or Alpha-0s to be fully transparent
-                            if val == 255 or a == 0:
-                                f.write(f"{val} {r}/{g}/{b}@100 {val+1} {r}/{g}/{b}@100\n")
-                            else:
-                                f.write(f"{val} {r}/{g}/{b}@{transparency} {val+1} {r}/{g}/{b}@{transparency}\n")
-                        else:
-                            f.write(f"{val} 0/0/0@100 {val+1} 0/0/0@100\n")
-                else:
-                    # Minimal failsafe
+            if cmap_dict:
+                color_palette = maps_dir / f"dynamic_cpt_{unique_id}.cpt"
+                _write_cpt_from_cmap(color_palette, cmap_dict)
+            elif layer in ["WTR", "BWTR"]:
+                fallback_name = f"{'DSWx-HLS' if 'HLS' in short_name else 'DSWx-S1'}_{layer}.cpt"
+                color_palette = palette_dir / fallback_name
+                cmap_dict = _cpt_to_cmap_dict(color_palette)
+            elif layer == "VEG-DIST-STATUS":
+                color_palette = palette_dir / "VEG-DIST-STATUS.cpt"
+                cmap_dict = _cpt_to_cmap_dict(color_palette)
+            elif layer == "CONF":
+                cmap_dict = _default_conf_cmap(short_name)
+                color_palette = maps_dir / f"dynamic_cpt_{unique_id}.cpt"
+                _write_cpt_from_cmap(color_palette, cmap_dict)
+            else:
+                color_palette = maps_dir / f"dynamic_cpt_{unique_id}.cpt"
+                with open(color_palette, "w") as f:
                     f.write("0 0/0/0@100 256 0/0/0@100\n")
-                f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
+                    f.write("B 255/255/255@100\nF 255/255/255@100\nN 255/255/255@100\n")
 
             # Draw the Map
             fig.grdimage(
                 grid=grd,
                 region=region_padded,
                 projection=projection,
-                cmap=color_palette,
+                cmap=str(color_palette),
                 frame=["WSne", "xaf", "yaf"],
                 nan_transparent=True,
                 interpolation="n"

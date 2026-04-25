@@ -1,7 +1,12 @@
 import concurrent.futures
+import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 import time
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Optional, Tuple
@@ -141,6 +146,249 @@ def get_master_grid_props(bbox_latlon: list, target_crs_proj4: str, target_res: 
     }
 
 
+def _grid_bounds_from_master_grid(master_grid: dict) -> tuple[float, float, float, float]:
+    """Return (xmin, ymin, xmax, ymax) bounds for a pixel-aligned master grid."""
+    transform = master_grid["transform"]
+    height, width = master_grid["shape"]
+    xres = transform.a
+    yres = abs(transform.e)
+    xmin = transform.c
+    ymax = transform.f
+    xmax = xmin + (width * xres)
+    ymin = ymax - (height * yres)
+    return xmin, ymin, xmax, ymax
+
+
+def _resolve_gdalwarp_binary() -> str:
+    """Locate the gdalwarp executable in the active environment."""
+    candidate = Path(sys.executable).resolve().parent / "gdalwarp"
+    if candidate.exists():
+        return str(candidate)
+
+    binary = shutil.which("gdalwarp")
+    if binary:
+        return binary
+
+    raise FileNotFoundError("Could not locate gdalwarp in the active environment.")
+
+
+def _build_gdalwarp_env() -> dict:
+    """Ensure external GDAL subprocesses can find PROJ data."""
+    env = os.environ.copy()
+    if env.get("PROJ_LIB"):
+        return env
+
+    proj_candidate = Path(sys.executable).resolve().parent.parent / "share" / "proj"
+    if proj_candidate.exists():
+        env["PROJ_LIB"] = str(proj_candidate)
+    return env
+
+
+def _resampling_to_gdalwarp(resampling) -> str:
+    """Translate rasterio/rioxarray resampling identifiers to gdalwarp strings."""
+    if str(resampling).endswith(".nearest") or str(resampling) == "0":
+        return "near"
+    if str(resampling).endswith(".bilinear") or str(resampling) == "1":
+        return "bilinear"
+    return "near"
+
+
+def warp_dataarray_to_grid(
+    da: xr.DataArray,
+    master_grid: dict,
+    resampling,
+    temp_dir: Path,
+    temp_prefix: str = "warp",
+    username: str | None = None,
+    password: str | None = None,
+) -> xr.DataArray:
+    """
+    Reproject a DataArray into the master grid using external gdalwarp.
+
+    This avoids Linux heap corruption observed with in-process rio.reproject()
+    on this workflow's GDAL/rasterio stack.
+    """
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    temp_stem = f"{temp_prefix}_{uuid.uuid4().hex}"
+    src_path = temp_dir / f"{temp_stem}_src.tif"
+    warped_path = temp_dir / f"{temp_stem}_warped.tif"
+
+    source_path = None
+    source_encoding = da.encoding.get("source")
+    if source_encoding:
+        source_str = str(source_encoding)
+        source_candidate = Path(source_str)
+        if source_candidate.exists():
+            source_path = source_candidate
+        elif source_str.startswith(("http://", "https://")):
+            with open_file(
+                source_str,
+                earthdata_username=username,
+                earthdata_password=password,
+            ) as remote_file, open(src_path, "wb") as local_file:
+                shutil.copyfileobj(remote_file, local_file)
+            source_path = src_path
+
+    try:
+        if source_path is None:
+            array_to_image(
+                da,
+                output=str(src_path),
+                driver="GTiff",
+                compress="deflate",
+                colormap=None,
+                nodata=da.rio.nodata,
+            )
+            source_path = src_path
+
+        xmin, ymin, xmax, ymax = _grid_bounds_from_master_grid(master_grid)
+        xres = master_grid["transform"].a
+        yres = abs(master_grid["transform"].e)
+
+        gdalwarp_cmd = [
+            _resolve_gdalwarp_binary(),
+            "-overwrite",
+            "-t_srs",
+            str(master_grid["dst_crs"]),
+            "-r",
+            _resampling_to_gdalwarp(resampling),
+            "-tr",
+            str(xres),
+            str(yres),
+            "-te",
+            str(xmin),
+            str(ymin),
+            str(xmax),
+            str(ymax),
+            "-te_srs",
+            str(master_grid["dst_crs"]),
+            "-co",
+            "COMPRESS=DEFLATE",
+        ]
+
+        nodata = da.rio.nodata
+        if nodata is not None and not np.isnan(nodata):
+            nodata_str = str(nodata)
+            gdalwarp_cmd.extend(["-srcnodata", nodata_str, "-dstnodata", nodata_str])
+
+        gdalwarp_cmd.extend([str(source_path), str(warped_path)])
+
+        subprocess.run(
+            gdalwarp_cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=_build_gdalwarp_env(),
+        )
+
+        warped = rioxarray.open_rasterio(warped_path, masked=False)
+        warped.load()
+        loaded_warped = warped.copy(deep=True)
+        loaded_warped.encoding.pop("source", None)
+        warped.close()
+        return loaded_warped
+
+    except subprocess.CalledProcessError as exc:
+        logger.error("External gdalwarp failed for %s", temp_prefix)
+        if exc.stdout:
+            logger.error("gdalwarp stdout: %s", exc.stdout.strip())
+        if exc.stderr:
+            logger.error("gdalwarp stderr: %s", exc.stderr.strip())
+        raise
+    finally:
+        if src_path.exists() and source_path == src_path:
+            try:
+                src_path.unlink()
+            except Exception:
+                pass
+        if warped_path.exists():
+            try:
+                warped_path.unlink()
+            except Exception:
+                pass
+
+
+def _serialize_raster_metadata(metadata: dict) -> dict:
+    """Convert rasterio metadata into a JSON-safe dictionary."""
+    serialized = metadata.copy()
+
+    for key, value in list(serialized.items()):
+        if isinstance(value, np.generic):
+            serialized[key] = value.item()
+
+    serialized["dtype"] = np.dtype(serialized["dtype"]).name
+
+    crs = serialized.get("crs")
+    if crs is not None:
+        serialized["crs"] = str(crs)
+
+    transform = serialized.get("transform")
+    if isinstance(transform, Affine):
+        serialized["transform"] = list(transform)
+    elif isinstance(transform, tuple):
+        serialized["transform"] = list(transform)
+
+    return serialized
+
+
+def _write_raster_in_subprocess(array: np.ndarray, output: str, metadata: dict) -> None:
+    """Write a raster in a clean subprocess to avoid inherited GDAL heap corruption."""
+    output_path = Path(output)
+    temp_dir = output_path.parent
+    temp_stem = f".array_to_image_{uuid.uuid4().hex}"
+    array_path = temp_dir / f"{temp_stem}.npy"
+    metadata_path = temp_dir / f"{temp_stem}.json"
+
+    np.save(array_path, array, allow_pickle=False)
+    with open(metadata_path, "w") as fh:
+        json.dump(_serialize_raster_metadata(metadata), fh)
+
+    script = """
+import json
+import sys
+import numpy as np
+import rasterio
+from rasterio.transform import Affine
+
+array = np.load(sys.argv[1], allow_pickle=False)
+with open(sys.argv[2]) as fh:
+    metadata = json.load(fh)
+
+transform = metadata.get("transform")
+if transform is not None:
+    metadata["transform"] = Affine(*transform)
+
+with rasterio.open(sys.argv[3], "w", **metadata) as dst:
+    if array.ndim == 2:
+        dst.write(array, 1)
+    else:
+        dst.write(np.moveaxis(array, -1, 0))
+"""
+
+    try:
+        subprocess.run(
+            [sys.executable, "-c", script, str(array_path), str(metadata_path), str(output_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=_build_gdalwarp_env(),
+        )
+    except subprocess.CalledProcessError as exc:
+        if exc.stdout:
+            logger.error("array_to_image subprocess stdout: %s", exc.stdout.strip())
+        if exc.stderr:
+            logger.error("array_to_image subprocess stderr: %s", exc.stderr.strip())
+        raise
+    finally:
+        for path in (array_path, metadata_path):
+            if path.exists():
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+
+
 def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_layer_links=None, benchmark_stats=None, username=None, password=None):
     """
     Compile and load data from the provided layer links for mosaicking using multithreading.
@@ -200,11 +448,36 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
     # Define helpers for loading data
     def _load_single(link):
         """Helper to load a single dataset, handling auth fallback."""
+        source_path = None
         try:
-            return rioxarray.open_rasterio(link, masked=False)
+            source_candidate = Path(str(link))
+            if source_candidate.exists():
+                source_path = source_candidate
+            else:
+                cache_dir = Path("/tmp/disasters_source_cache")
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                suffix = source_candidate.suffix or ".tif"
+                source_path = cache_dir / f"{uuid.uuid4().hex}{suffix}"
+                with open_file(
+                    link,
+                    earthdata_username=username,
+                    earthdata_password=password,
+                ) as remote_file, open(source_path, "wb") as local_file:
+                    shutil.copyfileobj(remote_file, local_file)
+
+            ds = rioxarray.open_rasterio(source_path, masked=False)
+            ds.load()
+            loaded = ds.copy(deep=True)
+            loaded.encoding["source"] = str(source_path)
+            ds.close()
+            return loaded
         except Exception:
-            f = open_file(link, earthdata_username=username, earthdata_password=password)
-            return rioxarray.open_rasterio(f, masked=False)
+            if source_path is not None and source_path.exists() and not Path(str(link)).exists():
+                try:
+                    source_path.unlink()
+                except Exception:
+                    pass
+            raise
 
     def _run_sequential(links):
         """Sequential loading for benchmarking."""
@@ -214,7 +487,7 @@ def compile_and_load_data(data_layer_links, mode, conf_layer_links=None, date_la
         """Concurrent loading using ThreadPoolExecutor."""
         if not links:
             return []
-        max_workers = min(20, len(links))
+        max_workers = 1
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             return list(executor.map(_load_single, links))
 
@@ -737,34 +1010,41 @@ def array_to_image(
         )
 
     if isinstance(array, xr.DataArray):
+        if "latitude" in array.dims and "longitude" in array.dims:
+            array = array.rename({"latitude": "y", "longitude": "x"})
+        elif "lat" in array.dims and "lon" in array.dims:
+            array = array.rename({"lat": "y", "lon": "x"})
+
         if (
             hasattr(array, "rio")
             and (array.rio.crs is not None)
             and (array.rio.transform() is not None)
         ):
+            crs = array.rio.crs
+            transform = array.rio.transform()
+        elif source is None and hasattr(array, "encoding") and ("source" in array.encoding):
+            source = array.encoding["source"]
 
-            if "latitude" in array.dims and "longitude" in array.dims:
-                array = array.rename({"latitude": "y", "longitude": "x"})
-            elif "lat" in array.dims and "lon" in array.dims:
-                array = array.rename({"lat": "y", "lon": "x"})
+        if array.ndim == 2 and ("x" in array.dims) and ("y" in array.dims):
+            array = array.transpose("y", "x")
+        elif array.ndim == 3 and ("x" in array.dims) and ("y" in array.dims):
+            dims = list(array.dims)
+            dims.remove("x")
+            dims.remove("y")
+            array = array.transpose(dims[0], "y", "x")
 
-            if array.ndim == 2 and ("x" in array.dims) and ("y" in array.dims):
-                array = array.transpose("y", "x")
-            elif array.ndim == 3 and ("x" in array.dims) and ("y" in array.dims):
-                dims = list(array.dims)
-                dims.remove("x")
-                dims.remove("y")
-                array = array.transpose(dims[0], "y", "x")
-            if "long_name" in array.attrs:
-                array.attrs.pop("long_name")
+        if "long_name" in array.attrs:
+            array.attrs.pop("long_name")
 
-            array.rio.to_raster(
-                output, driver=driver, compress=compress, dtype=dtype, **kwargs
-            )
-            return output
+        # Avoid rioxarray's to_raster writer here; writing through rasterio has
+        # been more stable for large mosaics in this pipeline.
+        array = array.values
 
     if array.ndim == 3 and transpose:
         array = np.transpose(array, (1, 2, 0))
+
+    if array.ndim == 3 and array.shape[2] == 1:
+        array = array[:, :, 0]
 
     out_dir = os.path.dirname(os.path.abspath(output))
     if not os.path.exists(out_dir):
@@ -773,17 +1053,23 @@ def array_to_image(
     ext = os.path.splitext(output)[-1].lower()
     if ext == "":
         output += ".tif"
-        driver = "COG"
-    elif ext == ".png":
-        driver = "PNG"
-    elif ext == ".jpg" or ext == ".jpeg":
-        driver = "JPEG"
-    elif ext == ".jp2":
-        driver = "JP2OpenJPEG"
-    elif ext == ".tiff":
+        ext = ".tif"
+
+    if driver is None:
+        if ext in (".tif", ".tiff"):
+            driver = "GTiff"
+        elif ext == ".png":
+            driver = "PNG"
+        elif ext == ".jpg" or ext == ".jpeg":
+            driver = "JPEG"
+        elif ext == ".jp2":
+            driver = "JP2OpenJPEG"
+        else:
+            driver = "COG"
+    elif ext in (".tif", ".tiff") and driver == "COG":
+        # Temporary .tif outputs in this pipeline are written as plain GeoTIFFs
+        # and converted to COG in a later step.
         driver = "GTiff"
-    else:
-        driver = "COG"
 
     if source is not None:
         with rasterio.open(source) as src:
@@ -792,8 +1078,8 @@ def array_to_image(
             if compress is None:
                 compress = src.compression
     else:
-        if cellsize is None:
-            raise ValueError("resolution must be provided if source is not provided")
+        # if cellsize is None:
+        #     raise ValueError("resolution must be provided if source is not provided")
         if crs is None:
             raise ValueError(
                 "crs must be provided if source is not provided, such as EPSG:3857"
@@ -854,17 +1140,66 @@ def array_to_image(
         metadata["count"] = array.shape[2]
     if compress is not None and (driver in ["GTiff", "COG"]):
         metadata["compress"] = compress
+    embed_colormap = bool(colormap) and driver not in ["GTiff", "COG"]
+    if colormap and not embed_colormap:
+        logger.info(
+            "array_to_image skipping embedded colormap for %s output=%s to avoid libtiff crashes",
+            driver,
+            output,
+        )
 
     metadata.update(**kwargs)
+    logger.info(
+        "array_to_image opening raster: output=%s driver=%s shape=%s dtype=%s count=%s crs=%s transform=%s photometric=%s",
+        output,
+        metadata["driver"],
+        array.shape,
+        array.dtype,
+        metadata.get("count"),
+        metadata["crs"],
+        metadata["transform"],
+        metadata.get("photometric"),
+    )
+    output_path = Path(output)
+    if output_path.exists():
+        logger.info("array_to_image removing existing output before rewrite: %s", output)
+        output_path.unlink()
+    if driver in ["GTiff", "COG"]:
+        _write_raster_in_subprocess(array, output, metadata)
+        return output
     # Create a new GeoTIFF file and write the array to it
     with rasterio.open(output, "w", **metadata) as dst:
         if array.ndim == 2:
-            dst.write(array, 1)
-            if colormap:
+            logger.info(
+                "array_to_image writing 2D array: output=%s shape=%s dtype=%s strides=%s c_contig=%s f_contig=%s",
+                output,
+                array.shape,
+                array.dtype,
+                array.strides,
+                array.flags["C_CONTIGUOUS"],
+                array.flags["F_CONTIGUOUS"],
+            )
+            if embed_colormap:
                 dst.write_colormap(1, colormap)
+            dst.write(array, 1)
         elif array.ndim == 3:
             for i in range(array.shape[2]):
-                dst.write(array[:, :, i], i + 1)
-                if colormap:
+                band = array[:, :, i]
+                logger.info(
+                    "array_to_image writing band: output=%s band=%s array_shape=%s band_shape=%s dtype=%s "
+                    "array_strides=%s band_strides=%s array_c_contig=%s band_c_contig=%s band_f_contig=%s",
+                    output,
+                    i + 1,
+                    array.shape,
+                    band.shape,
+                    band.dtype,
+                    array.strides,
+                    band.strides,
+                    array.flags["C_CONTIGUOUS"],
+                    band.flags["C_CONTIGUOUS"],
+                    band.flags["F_CONTIGUOUS"],
+                )
+                if embed_colormap:
                     dst.write_colormap(i + 1, colormap)
+                dst.write(band, i + 1)
     return output

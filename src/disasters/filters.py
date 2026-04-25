@@ -1,14 +1,17 @@
 import logging
+import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
+import uuid
 
 import numpy as np
 import pandas as pd
-import pygmt
+import rasterio
 import xarray as xr
 from osgeo import gdal
-from rasterio.enums import Resampling
 
 from .mosaic import get_image_colormap
 
@@ -202,39 +205,100 @@ def generate_coastal_mask(bbox: list, master_grid: dict) -> Optional[xr.DataArra
     Returns:
         xr.DataArray: Boolean xarray DataArray where True = Land/Inland Water, False = Ocean.
     """
-    logger.info("Generating global coastal water mask using PyGMT...")
-    
-    # bbox is [South, North, West, East]
-    # pygmt region is [xmin, xmax, ymin, ymax]
-    region = [bbox[2], bbox[3], bbox[0], bbox[1]]
+    logger.info("Generating global coastal water mask using external GMT/GDAL tools...")
+
+    temp_dir = Path("/tmp/disasters_coastal_mask")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_stem = f"coastal_mask_{uuid.uuid4().hex}"
+    mask_geo_path = temp_dir / f"{temp_stem}.nc"
+    mask_utm_path = temp_dir / f"{temp_stem}.tif"
+
+    transform = master_grid["transform"]
+    height, width = master_grid["shape"]
+    xres = transform.a
+    yres = abs(transform.e)
+    xmin = transform.c
+    ymax = transform.f
+    xmax = xmin + (width * xres)
+    ymin = ymax - (height * yres)
+
+    env = os.environ.copy()
+    env.setdefault("GMT_USERDIR", "/tmp/.gmt")
+    if "PROJ_LIB" not in env:
+        proj_candidate = Path(sys.executable).resolve().parent.parent / "share" / "proj"
+        if proj_candidate.exists():
+            env["PROJ_LIB"] = str(proj_candidate)
+
+    gmt_bin = Path(sys.executable).resolve().parent / "gmt"
+    gdalwarp_bin = Path(sys.executable).resolve().parent / "gdalwarp"
 
     try:
-        # mask_values=[ocean, land, lake, island, pond]
-        # 0 for ocean, 1 for everything else to preserve inland water
-        mask_geo = pygmt.grdlandmask(
-            region=region,
-            spacing='30e',  
-            maskvalues=[0, 1, 1, 1, 1],
-            resolution='f'
+        subprocess.run(
+            [
+                str(gmt_bin),
+                "grdlandmask",
+                f"-R{bbox[2]}/{bbox[3]}/{bbox[0]}/{bbox[1]}",
+                "-I30e",
+                "-N0/1/1/1/1",
+                "-Df",
+                f"-G{mask_geo_path}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
         )
-        
-        # Assign CRS so rioxarray can reproject it
-        mask_geo = mask_geo.rio.write_crs("EPSG:4326")
 
-        # Reproject to align exactly with the master UTM grid
-        mask_utm = mask_geo.rio.reproject(
-            master_grid['dst_crs'],
-            shape=master_grid['shape'],
-            transform=master_grid['transform'],
-            resampling=Resampling.nearest
+        subprocess.run(
+            [
+                str(gdalwarp_bin),
+                "-overwrite",
+                "-s_srs",
+                "EPSG:4326",
+                "-t_srs",
+                str(master_grid["dst_crs"]),
+                "-r",
+                "near",
+                "-tr",
+                str(xres),
+                str(yres),
+                "-te",
+                str(xmin),
+                str(ymin),
+                str(xmax),
+                str(ymax),
+                "-te_srs",
+                str(master_grid["dst_crs"]),
+                "-co",
+                "COMPRESS=DEFLATE",
+                str(mask_geo_path),
+                str(mask_utm_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
         )
-        
-        # Squeeze to 2D boolean mask (True for valid land/inland water)
-        return mask_utm.squeeze() == 1
 
-    except Exception as e:
-        logger.warning(f"Failed to generate PyGMT coastal mask: {e}")
+        with rasterio.open(mask_utm_path) as src:
+            mask = src.read(1)
+
+        return xr.DataArray(mask != 0, dims=("y", "x"))
+
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        logger.warning(f"Failed to generate coastal mask with external tools: {stderr}")
         return None
+    except Exception as e:
+        logger.warning(f"Failed to generate coastal mask: {e}")
+        return None
+    finally:
+        for path in (mask_geo_path, mask_utm_path):
+            if path.exists():
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
 
 
 def process_dem_and_slope(
