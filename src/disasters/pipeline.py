@@ -700,6 +700,9 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
                         colormap=colormap,
                         nodata=nodata,
                     )
+
+                    # Translate the standard GTiff into a COG in-place
+                    save_gtiff_as_cog(mosaic_path, mosaic_path)
                     
                     # Save Synchronized CONF Layer (if it was requested via stacking)
                     if conf_mosaic is not None:
@@ -713,6 +716,9 @@ def run_mosaic_only(input_dir: Path, output_dir: Path, bbox: Sequence[float] | s
                             colormap=None,
                             nodata=255,
                         )
+
+                        # Translate the standard GTiff into a COG in-place
+                        save_gtiff_as_cog(mosaic_path, mosaic_path)
 
                     # Close all xarray handles to prevent sys.excepthook teardown crashes
                     if DS is not None:
@@ -1457,6 +1463,9 @@ def generate_products(
                             nodata=nodata,
                         )
 
+                        # Translate the standard GTiff into a COG in-place
+                        save_gtiff_as_cog(mosaic_path, mosaic_path)
+
                         with rasterio.open(mosaic_path) as ds:
                             mosaic_crs = ds.crs
 
@@ -1488,6 +1497,10 @@ def generate_products(
                                 colormap=conf_colormap,
                                 nodata=255,
                             )
+
+                            # Translate the standard GTiff into a COG in-place
+                            save_gtiff_as_cog(mosaic_path, mosaic_path)
+
                             logger.info(f"Saved spatially synchronized CONF layer: {conf_name}")
 
                             # Submit Plotting Task for CONF
