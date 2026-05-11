@@ -70,15 +70,11 @@ def cli() -> None:
     help="Path to a local directory containing pre-downloaded OPERA geotiffs. If provided, cloud search is skipped.",
 )
 @click.option(
-    "-sn",
-    "--short-name",
+    "-p",
+    "--product",
     type=click.Choice(VALID_SHORT_NAMES),
-    required=False,
-    help=(
-        "Short name to filter the DataFrame (must be one of the known OPERA "
-        "products). Currently not used by the pipeline logic but kept for "
-        "CLI compatibility."
-    ),
+    default=None,
+    help="Target a specific OPERA product for generation (Mutually exclusive with --mode).",
 )
 @click.option(
     "-l",
@@ -114,8 +110,7 @@ def cli() -> None:
     "-m",
     "--mode",
     type=click.Choice(VALID_MODES),
-    default="flood",
-    show_default=True,
+    default=None,
     help="Mode of operation: flood, fire, landslide, earthquake, rtc-rgb.",
 )
 @click.option(
@@ -191,11 +186,11 @@ def run(
     zoom_bbox: Optional[str],
     output_dir: Path,
     local_dir: Optional[Path],
-    short_name: Optional[str],
+    product: Optional[str],
     layer_name: Optional[str],
     date: Optional[str],
     number_of_dates: int,
-    mode: str,
+    mode: Optional[str],
     functionality: str,
     layout_title: str,
     filter_date: Optional[str],
@@ -207,6 +202,11 @@ def run(
     skip_existing: bool
 ) -> None:
     """Run the disaster pipeline (end-to-end)."""
+    if mode and product:
+        raise click.UsageError("You cannot use both --mode and --product at the same time.")
+    if not mode and not product:
+        raise click.UsageError("You must specify either --mode or --product.")
+
     # Ensure slope values are between 0 and 100 degrees, if provided
     if slope_threshold is not None and not (0 <= slope_threshold <= 100):
         raise click.BadParameter("Slope threshold must be between 0 and 100.", param_hint="--slope-threshold")
@@ -241,7 +241,7 @@ def run(
         zoom_bbox=zoom_bbox_arg,
         output_dir=output_dir,
         local_dir=local_dir,
-        short_name=short_name,
+        product=product,
         layer_name=layer_name,
         date=date,
         number_of_dates=number_of_dates,
@@ -306,6 +306,13 @@ def run(
     help="Optional: Filter summary to only count products relevant to a specific mode.",
 )
 @click.option(
+    "-p",
+    "--product",
+    type=click.Choice(VALID_SHORT_NAMES),
+    default=None,
+    help="Target a specific OPERA product for generation (Mutually exclusive with --mode).",
+)
+@click.option(
     "-c",
     "--compute_cloudiness",
     is_flag=True,
@@ -318,9 +325,12 @@ def search(
     date: Optional[str],
     number_of_dates: int,
     mode: Optional[str],
+    product: Optional[str],
     compute_cloudiness: bool
 ) -> None:
     """Query OPERA catalog and save metadata without downloading imagery."""
+    if mode and product:
+        raise click.UsageError("You cannot use both --mode and --product at the same time.")
     
     # Process bbox tokens
     bbox_parts = bbox.replace(",", " ").split()
@@ -341,6 +351,7 @@ def search(
         date=date,
         number_of_dates=number_of_dates,
         mode=mode,
+        product=product,
         compute_cloudiness=compute_cloudiness
     )
     
@@ -392,6 +403,13 @@ def search(
     help="Optional: Filter downloads to only include products and layers relevant to a specific mode.",
 )
 @click.option(
+    "-p",
+    "--product",
+    type=click.Choice(VALID_SHORT_NAMES),
+    default=None,
+    help="Target a specific OPERA product for generation (Mutually exclusive with --mode).",
+)
+@click.option(
     "-c",
     "--compute_cloudiness",
     is_flag=True,
@@ -405,10 +423,13 @@ def download(
     date: Optional[str],
     number_of_dates: int,
     mode: Optional[str],
+    product: Optional[str],
     compute_cloudiness: bool
 ) -> None:
     """Download OPERA granules over an AOI/time window for local use."""
-    
+    if mode and product:
+        raise click.UsageError("You cannot use both --mode and --product at the same time.")
+        
     # Process bbox tokens
     bbox_parts = bbox.replace(",", " ").split()
     if len(bbox_parts) == 4:
@@ -428,6 +449,7 @@ def download(
         date=date,
         number_of_dates=number_of_dates,
         mode=mode,
+        product=product,
         compute_cloudiness=compute_cloudiness
     )
     
