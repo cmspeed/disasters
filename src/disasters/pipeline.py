@@ -100,6 +100,59 @@ class PipelineConfig:
     skip_existing: bool = False
 
 
+def get_local_spatial_properties(df_opera: pd.DataFrame) -> tuple[list[float], str]:
+    """
+    Calculates the global bounding box [S, N, W, E] and most common CRS 
+    from a local DataFrame of OPERA products by reading their headers.
+    
+    Args:
+        df_opera (pd.DataFrame): DataFrame containing OPERA metadata with download URLs.
+    Returns:
+        tuple: ([S, N, W, E], most_common_crs_proj4)
+    """
+    logger.info("Calculating spatial properties from local files...")
+    url_cols = [c for c in df_opera.columns if c.startswith("Download URL")]
+    all_files = []
+    for c in url_cols:
+        all_files.extend(df_opera[c].dropna().tolist())
+    all_files = list(set(all_files)) # Unique files only
+
+    minx, miny, maxx, maxy = float('inf'), float('inf'), float('-inf'), float('-inf')
+    crs_counter = Counter()
+
+    for f in all_files:
+        try:
+            with rasterio.open(f) as src:
+                bounds = src.bounds
+                crs = src.crs
+                
+                if crs is not None:
+                    crs_counter[crs.to_string()] += 1
+                    
+                # Transform to EPSG:4326 to match S, N, W, E expected format
+                if crs and crs.to_string() != "EPSG:4326":
+                    left, bottom, right, top = transform_bounds(crs, "EPSG:4326", *bounds)
+                else:
+                    left, bottom, right, top = bounds
+                
+                minx = min(minx, left)
+                miny = min(miny, bottom)
+                maxx = max(maxx, right)
+                maxy = max(maxy, top)
+        except Exception as e:
+            logger.warning(f"Could not read spatial properties from {f}: {e}")
+
+    if minx == float('inf'):
+        raise RuntimeError("Could not calculate bounding box from local files.")
+
+    most_common_crs = crs_counter.most_common(1)[0][0]
+    
+    logger.info(f"Local Master CRS determined: {most_common_crs}")
+    
+    # Return [S, N, W, E] and the CRS
+    return [miny, maxy, minx, maxx], most_common_crs
+
+
 def run_pipeline(config: PipelineConfig) -> Path | None:
     """
     Run the end-to-end disaster pipeline (CLI-independent).
