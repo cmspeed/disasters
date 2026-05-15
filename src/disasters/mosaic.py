@@ -359,11 +359,19 @@ transform = metadata.get("transform")
 if transform is not None:
     metadata["transform"] = Affine(*transform)
 
+colormap = None
+if "colormap" in metadata:
+    colormap = {int(k): tuple(v) for k, v in metadata.pop("colormap").items()}
 with rasterio.open(sys.argv[3], "w", **metadata) as dst:
     if array.ndim == 2:
         dst.write(array, 1)
+        if colormap:
+            dst.write_colormap(1, colormap)
     else:
         dst.write(np.moveaxis(array, -1, 0))
+        if colormap:
+            for i in range(array.shape[-1]):
+                dst.write_colormap(i + 1, colormap)
 """
 
     try:
@@ -1078,8 +1086,6 @@ def array_to_image(
             if compress is None:
                 compress = src.compression
     else:
-        # if cellsize is None:
-        #     raise ValueError("resolution must be provided if source is not provided")
         if crs is None:
             raise ValueError(
                 "crs must be provided if source is not provided, such as EPSG:3857"
@@ -1140,13 +1146,10 @@ def array_to_image(
         metadata["count"] = array.shape[2]
     if compress is not None and (driver in ["GTiff", "COG"]):
         metadata["compress"] = compress
-    embed_colormap = bool(colormap) and driver not in ["GTiff", "COG"]
-    if colormap and not embed_colormap:
-        logger.info(
-            "array_to_image skipping embedded colormap for %s output=%s to avoid libtiff crashes",
-            driver,
-            output,
-        )
+    
+    # Pass colormap to metadata dictionary (if applicable)
+    if colormap:
+        metadata["colormap"] = colormap
 
     metadata.update(**kwargs)
     logger.info(
@@ -1160,14 +1163,18 @@ def array_to_image(
         metadata["transform"],
         metadata.get("photometric"),
     )
+    
     output_path = Path(output)
     if output_path.exists():
         logger.info("array_to_image removing existing output before rewrite: %s", output)
         output_path.unlink()
+        
+    # Execute through the safe memory-isolated subprocess if it's a TIF!
     if driver in ["GTiff", "COG"]:
         _write_raster_in_subprocess(array, output, metadata)
         return output
-    # Create a new GeoTIFF file and write the array to it
+        
+    # Fallback to direct rasterio writing for non-TIF formats (e.g. PNG/JPEG)
     with rasterio.open(output, "w", **metadata) as dst:
         if array.ndim == 2:
             logger.info(
@@ -1179,7 +1186,7 @@ def array_to_image(
                 array.flags["C_CONTIGUOUS"],
                 array.flags["F_CONTIGUOUS"],
             )
-            if embed_colormap:
+            if colormap:
                 dst.write_colormap(1, colormap)
             dst.write(array, 1)
         elif array.ndim == 3:
@@ -1199,7 +1206,7 @@ def array_to_image(
                     band.flags["C_CONTIGUOUS"],
                     band.flags["F_CONTIGUOUS"],
                 )
-                if embed_colormap:
+                if colormap:
                     dst.write_colormap(i + 1, colormap)
                 dst.write(band, i + 1)
     return output

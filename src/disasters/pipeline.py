@@ -1007,8 +1007,7 @@ def generate_products(
 
     # Extract and find unique dates, sort them
     df_opera["Start Date"] = df_opera["Start Time"].dt.date.astype(str)
-    unique_dates = df_opera["Start Date"].dropna().unique()
-    unique_dates.sort()
+    unique_dates = sorted(df_opera["Start Date"].dropna().unique())
 
     # Create an index of mosaics created for use in pair-wise differencing
     mosaic_index = defaultdict(lambda: defaultdict(dict))
