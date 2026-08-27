@@ -128,10 +128,11 @@ def compute_and_write_difference(
 
             nd_float = float(nd)
 
-            # Detect either DSWx-HLS or DSWx-S1 from filename
+            # Detect either DSWx-HLS, DSWx-S1, or DSWx-NI from filename
             filename = str(out_path.name)
             is_hls = "HLS" in filename
             is_s1 = "S1" in filename and not is_hls
+            is_ni = "NI" in filename
 
             # Define the Color Palette (R, G, B, Alpha)
             # Colors: Blues for Gains, Reds for Losses, Transparent for No Change
@@ -198,7 +199,7 @@ def compute_and_write_difference(
                 9: "Loss: Open Water to Partial Surface Water",
                 8: "Gain: Not Water to Partial Surface Water",
                 6: "Gain: Partial Surface Water to Open Water",
-                # S1 Specific
+                # S1/NISAR Specific
                 15: "No Change: Inundated Vegetation",
                 3: "Loss: Inundated Vegetation to Not Water",
                 13: "Loss: Open Water to Inundated Vegetation",
@@ -222,10 +223,10 @@ def compute_and_write_difference(
                     if k in full_names:
                         active_names[k] = full_names[k]
 
-            elif is_s1:
-                # S1: Include Universal + Inundated Veg (3, 7, 12, 13, 15)
-                s1_keys = universal_keys + [3, 7, 12, 13, 15]
-                for k in s1_keys:
+            elif is_s1 or is_ni:
+                # S1/NISAR: Include Universal + Inundated Veg (3, 7, 12, 13, 15)
+                sar_keys = universal_keys + [3, 7, 12, 13, 15]
+                for k in sar_keys:
                     if k in full_colormap:
                         active_colormap[k] = full_colormap[k]
                     if k in full_names:

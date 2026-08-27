@@ -521,7 +521,7 @@ def run_search_only(
     # If mode or product is provided, calculate how many of those found granules actually apply
     if mode:
         if mode == "flood":
-            short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+            short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1", "OPERA_L3_DSWX-NI_V1"]
         elif mode == "fire":
             short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
         elif mode == "landslide":
@@ -664,7 +664,7 @@ def run_download_only(
 
         # Define target datasets and primary + auxiliary layers
         if mode == "flood":
-            short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+            short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1", "OPERA_L3_DSWX-NI_V1"]
             target_layers = ["WTR", "BWTR", "CONF"]
         elif mode == "fire":
             short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]
@@ -1666,7 +1666,7 @@ def generate_products(
     # Define short names and layer names based on mode or product FIRST
     if mode:
         if mode == "flood":
-            short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"]
+            short_names = ["OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1", "OPERA_L3_DSWX-NI_V1"]
             layer_names = ["WTR", "BWTR"]
         elif mode == "fire":
             short_names = ["OPERA_L3_DIST-ALERT-HLS_V1", "OPERA_L3_DIST-ALERT-S1_V1"]

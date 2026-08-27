@@ -20,6 +20,7 @@ VALID_SHORT_NAMES = [
     "OPERA_L2_RTC-S1_V1",
     "OPERA_L2_CSLC-S1_V1",
     "OPERA_L3_DISP-S1_V1",
+    "OPERA_L3_DSWX-NI_V1",
 ]
 
 VALID_SATELLITES = ["sentinel-1", "sentinel-2", "landsat", "nisar"]

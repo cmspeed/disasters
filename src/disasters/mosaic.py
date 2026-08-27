@@ -740,7 +740,7 @@ def opera_rules(product: str = "OPERA_L3_DSWX-S1_V1", nodata: int = 255):
         method (function): A function that implements the custom merge method for the specified OPERA product.
     """
 
-    if product in ("OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1"):
+    if product in ("OPERA_L3_DSWX-HLS_V1", "OPERA_L3_DSWX-S1_V1", "OPERA_L3_DSWX-NI_V1"):
         priority = {
             1: 100,  # Open water (DSWx-HLS, DSWx-S1)
             2: 95,  # Partial surface water (DSWx-HLS)

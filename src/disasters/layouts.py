@@ -999,18 +999,31 @@ def make_layout(
 
     # Map text elements
     if layer == "MAX-EXTENT":
-        product_label = "DSWx-HLS" if "HLS" in short_name else "DSWx-S1"
+        if "HLS" in short_name:
+            product_label = "DSWx-HLS"
+            data_source = "NASA Harmonized Landsat and Sentinel-2"
+        elif "NI" in short_name:
+            product_label = "DSWx-NI"
+            data_source = "NASA/ISRO NISAR"
+        else:
+            product_label = "DSWx-S1"
+            data_source = "Copernicus Sentinel-1"
+            
         subtitle = f"OPERA Maximum Flood Extent ({product_label})"
         map_information = (
             f"This map depicts the cumulative maximum flood extent observed over the specified date range. "
             f"A pixel is marked as flooded if water was detected in any valid observation during this period. "
             f"Derived from {short_name} data."
         )
-        data_source = (
-            "NASA Harmonized Landsat and Sentinel-2"
-            if "HLS" in short_name
-            else "Copernicus Sentinel-1"
+
+    elif short_name == "OPERA_L3_DSWX-NI_V1" and layer != "CONF":
+        subtitle = "OPERA Dynamic Surface Water eXtent from NISAR (DSWx-NI)"
+        map_information = (
+            "The ARIA/OPERA water extent map is derived from an OPERA DSWx-NI mosaicked "
+            "product from NASA/ISRO NISAR data. "
+            "This map depicts regions of full surface water and inundated surface water."
         )
+        data_source = "NASA/ISRO NISAR"
 
     elif short_name == "OPERA_L3_DSWX-S1_V1" and layer != "CONF":
         subtitle = "OPERA Dynamic Surface Water eXtent from Sentinel-1 (DSWx-S1)"
@@ -1040,23 +1053,23 @@ def make_layout(
                 "product from Harmonized Landsat and Sentinel-2 data."
                 "This map depicts regions of full surface water and inundated surface water. "
             )
-        data_source = (
-            "NASA Harmonized Landsat and Sentinel-2"
-            if "HLS" in short_name
-            else "Copernicus Sentinel-1"
-        )
+        data_source = "NASA Harmonized Landsat and Sentinel-2"
 
     elif layer == "CONF":
-        product_label = "DSWx-HLS" if "HLS" in short_name else "DSWx-S1"
+        if "HLS" in short_name:
+            product_label = "DSWx-HLS"
+            data_source = "NASA Harmonized Landsat and Sentinel-2"
+        elif "NI" in short_name:
+            product_label = "DSWx-NI"
+            data_source = "NASA/ISRO NISAR"
+        else:
+            product_label = "DSWx-S1"
+            data_source = "Copernicus Sentinel-1"
+            
         subtitle = f"OPERA Dynamic Surface Water eXtent Confidence ({product_label})"
         map_information = (
             "This map depicts the confidence layer associated with the ARIA/OPERA water extent map. "
             "It represents the quality, probability, or classification confidence of the surface water."
-        )
-        data_source = (
-            "NASA Harmonized Landsat and Sentinel-2"
-            if "HLS" in short_name
-            else "Copernicus Sentinel-1"
         )
 
     elif short_name == "OPERA_L3_DIST-ALERT-S1_V1":

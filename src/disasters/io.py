@@ -130,6 +130,8 @@ def scan_local_directory(local_dir: Path) -> pd.DataFrame:
         "OPERA_L3_DIST-ALERT-HLS": "OPERA_L3_DIST-ALERT-HLS_V1",
         "OPERA_L3_DIST-ALERT-S1": "OPERA_L3_DIST-ALERT-S1_V1",
         "OPERA_L2_RTC-S1": "OPERA_L2_RTC-S1_V1",
+        "OPERA_L3_DSWX-NI": "OPERA_L3_DSWX-NI_V1",
+        "OPERA_L3_DSWx-NI": "OPERA_L3_DSWX-NI_V1",
     }
 
     files_processed_count = 0
